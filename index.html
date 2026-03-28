@@ -1,0 +1,1143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="资产管理">
+  <title>个人资产管理</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #f5f5f7; -webkit-font-smoothing: antialiased; }
+    #root { min-height: 100vh; }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo } = React;
+
+const EXCHANGE_RATES_DEFAULT = { USD: 6.91185, HKD: 0.8824194 };
+
+const DEFAULT_DATA = {
+  exchangeRates: { ...EXCHANGE_RATES_DEFAULT },
+  stockPrices: { QLD: 57.91, IBIT: 37.29, QQQM: 231.34, BOXX: 116.11, KORU: 269.5 },
+  lastFetchTime: null,
+  strategies: [
+    "每月第一个周四各定投100刀，不满1股存入现金仓位，每年平衡一次",
+    "QQQM:BOXX 8:2 每年再平衡一次，每隔4年右边+1直到50岁",
+    "到2026.08.01之前嘉信不入金",
+  ],
+  accounts: {
+    daodaozhijian: {
+      name: "大道至简", platform: "嘉信", currency: "USD", type: "stock",
+      holdings: [
+        { code: "QLD", shares: 2, cashPosition: 367.03, group: "投资-进攻" },
+        { code: "IBIT", shares: 0, cashPosition: 500, group: "投资-进攻" },
+      ],
+    },
+    wenjian: {
+      name: "稳健投资", platform: "汇丰", currency: "USD", type: "stock",
+      holdings: [
+        { code: "QQQM", shares: 0, cashPosition: 0, group: "投资-进攻" },
+        { code: "BOXX", shares: 2, cashPosition: 0, group: "投资-进攻" },
+      ],
+    },
+    zhifubao: {
+      name: "支付宝场外", platform: "支付宝", currency: "CNY", type: "fund",
+      holdings: [
+        { code: "诺安全球黄金", marketValue: 6029.33, group: "支付宝场外" },
+        { code: "华宝纳斯达克", marketValue: 6973.37, group: "支付宝场外" },
+        { code: "广发纳斯达克", marketValue: 4627.94, group: "支付宝场外" },
+        { code: "华安纳斯达克", marketValue: 3037.12, group: "支付宝场外" },
+      ],
+    },
+    zhifubaoOther: {
+      name: "汇丰-灵活智投", platform: "汇丰", currency: "HKD", type: "fund",
+      holdings: [
+        { code: "灵活智投", marketValue: 184.21, group: "其他" },
+      ],
+    },
+    touji: {
+      name: "投机账户", platform: "盈透", currency: "USD", type: "stock",
+      holdings: [
+        { code: "QLD", shares: 1.4265, cashPosition: 0, group: "其他" },
+        { code: "KORU", shares: 1.1845, cashPosition: 265.42, group: "其他" },
+      ],
+    },
+  },
+  cashAccount: {
+    items: [
+      { name: "汇丰香港活期", currency: "HKD", balance: 5716.14 },
+      { name: "汇丰香港活期", currency: "CNY", balance: 0 },
+      { name: "支付宝-余额宝", currency: "CNY", balance: 0 },
+      { name: "汇丰香港活期", currency: "USD", balance: 389.98 },
+    ],
+  },
+  history: [
+    { date: "2026-02", daodaozhijian: 853.28, zhifubao: 27265.35, cash: 11272.87, total: 40186.91, touji: 0 },
+    { date: "2026-03", daodaozhijian: 2221.01, zhifubao: 27646.33, cash: 9125.81, total: 40591.43, touji: 0 },
+    { date: "2026-04", daodaozhijian: 6806.33, zhifubao: 20830.31, cash: 7739.38, total: 36980.99, touji: 2841.90 },
+  ],
+};
+
+// --- Utility ---
+const fmt = (n, decimals = 2) => {
+  if (n === undefined || n === null || isNaN(n)) return "0.00";
+  return Number(n).toLocaleString("zh-CN", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+};
+const getPrice = (data, code) => data.stockPrices?.[code] ?? 0;
+const deepClone = (o) => JSON.parse(JSON.stringify(o));
+
+function calcAccountValue(account, data) {
+  let total = 0;
+  for (const h of (account.holdings || [])) {
+    if (account.type === "fund") total += h.marketValue || 0;
+    else total += (h.shares || 0) * getPrice(data, h.code) + (h.cashPosition || 0);
+  }
+  return total;
+}
+
+function calcCashCNY(items, rates) {
+  let total = 0;
+  for (const item of items) {
+    const r = item.currency === "CNY" ? 1 : item.currency === "USD" ? (rates.USD || 6.91) : (rates.HKD || 0.88);
+    total += item.balance * r;
+  }
+  return total;
+}
+
+function toCNY(v, cur, rates) {
+  if (cur === "CNY") return v;
+  if (cur === "USD") return v * (rates.USD || 6.91);
+  if (cur === "HKD") return v * (rates.HKD || 0.88);
+  return v;
+}
+
+// Dynamically collect all stock tickers that need price fetching
+function getAllTickers(data) {
+  const set = new Set();
+  Object.values(data.accounts).forEach(a => {
+    if (a.type === "stock") a.holdings.forEach(h => set.add(h.code));
+  });
+  return [...set];
+}
+
+// --- API ---
+async function fetchExchangeRates() {
+  try {
+    const res = await fetch("https://open.er-api.com/v6/latest/USD");
+    if (!res.ok) throw new Error();
+    const j = await res.json();
+    const cny = j.rates?.CNY, hkd = j.rates?.HKD;
+    if (cny && hkd) return { USD: cny, HKD: cny / hkd };
+  } catch (e) { console.warn("Exchange rate fetch failed:", e); }
+  return null;
+}
+
+async function fetchStockPrices(tickers) {
+  const prices = {};
+  await Promise.all(tickers.map(async (t) => {
+    try {
+      const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=1d`);
+      if (!res.ok) throw new Error();
+      const j = await res.json();
+      const p = j.chart?.result?.[0]?.meta?.regularMarketPrice;
+      if (p) prices[t] = p;
+    } catch (e) { console.warn(`Stock fetch failed: ${t}`, e); }
+  }));
+  return prices;
+}
+
+// --- Shared Styles ---
+const inputStyle = {
+  width: "100%", padding: "10px 12px", border: "1.5px solid #e8e8e8", borderRadius: 10,
+  fontSize: 15, background: "#fafafa", outline: "none", fontFamily: "'SF Mono', monospace", boxSizing: "border-box",
+};
+const labelStyle = { fontSize: 11, color: "#999", marginBottom: 4, display: "block" };
+const dangerBtnStyle = {
+  background: "none", border: "none", color: "#e76f51", fontSize: 12,
+  cursor: "pointer", padding: "4px 8px", borderRadius: 6,
+};
+
+// --- Components ---
+const Header = ({ totalCNY, showTotal, setShowTotal, fetching, onRefresh, lastFetch }) => (
+  <div style={{
+    background: "linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%)",
+    padding: "20px 20px 28px", borderRadius: "0 0 28px 28px", color: "#fff",
+    position: "relative", overflow: "hidden",
+  }}>
+    <div style={{ position: "absolute", top: -40, right: -40, width: 120, height: 120, borderRadius: "50%", background: "rgba(233,196,106,0.08)" }} />
+    <div style={{ position: "absolute", bottom: -20, left: -20, width: 80, height: 80, borderRadius: "50%", background: "rgba(233,196,106,0.05)" }} />
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, position: "relative" }}>
+      <div style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", letterSpacing: 1 }}>个人资产管理</div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <button onClick={onRefresh} disabled={fetching} style={{
+          background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8,
+          padding: "6px 10px", color: "#fff", fontSize: 14, cursor: "pointer", opacity: fetching ? 0.5 : 1,
+        }}>
+          <span style={{ display: "inline-block", animation: fetching ? "spin 1s linear infinite" : "none" }}>🔄</span>
+        </button>
+        <button onClick={() => setShowTotal(!showTotal)} style={{
+          background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8,
+          padding: "6px 10px", color: "#fff", fontSize: 16, cursor: "pointer",
+        }}>
+          {showTotal ? "👁" : "🙈"}
+        </button>
+      </div>
+    </div>
+    <div style={{ position: "relative" }}>
+      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", marginBottom: 4 }}>总资产 (CNY) <span style={{ fontSize: 9, color: "rgba(255,255,255,0.35)" }}>· 不含投机账户</span></div>
+      <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'SF Pro Display', -apple-system, sans-serif", letterSpacing: -0.5 }}>
+        {showTotal ? `¥${fmt(totalCNY)}` : "¥ ••••••"}
+      </div>
+      {lastFetch && <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 6 }}>行情更新于 {lastFetch}</div>}
+    </div>
+    <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+  </div>
+);
+
+const TabBar = ({ active, setActive }) => {
+  const tabs = [
+    { id: "overview", icon: "📊", label: "总览" },
+    { id: "accounts", icon: "💼", label: "账户" },
+    { id: "edit", icon: "✏️", label: "更新" },
+    { id: "history", icon: "📈", label: "趋势" },
+  ];
+  return (
+    <div style={{
+      display: "flex", justifyContent: "space-around", padding: "8px 0 4px",
+      background: "#fff", borderTop: "1px solid #f0f0f0",
+      position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 100,
+      paddingBottom: "max(8px, env(safe-area-inset-bottom))",
+    }}>
+      {tabs.map(t => (
+        <button key={t.id} onClick={() => setActive(t.id)} style={{
+          background: "none", border: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+          color: active === t.id ? "#0f3460" : "#999", fontSize: 10, fontWeight: active === t.id ? 600 : 400,
+          cursor: "pointer", padding: "4px 12px",
+        }}>
+          <span style={{ fontSize: 20 }}>{t.icon}</span><span>{t.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+};
+
+const Card = ({ title, children, extra, headerRight }) => (
+  <div style={{
+    background: "#fff", borderRadius: 16, padding: "16px 16px 12px", marginBottom: 12,
+    boxShadow: "0 1px 8px rgba(0,0,0,0.04)", border: "1px solid #f5f5f5",
+  }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+      <div style={{ fontSize: 15, fontWeight: 600, color: "#1a1a2e" }}>{title}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {extra && <div style={{ fontSize: 12, color: "#999" }}>{extra}</div>}
+        {headerRight}
+      </div>
+    </div>
+    {children}
+  </div>
+);
+
+// Confirm dialog
+const ConfirmModal = ({ message, onConfirm, onCancel }) => (
+  <div style={{
+    position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 1000,
+    background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center",
+    padding: 24,
+  }}>
+    <div style={{ background: "#fff", borderRadius: 16, padding: 24, maxWidth: 320, width: "100%", textAlign: "center" }}>
+      <div style={{ fontSize: 15, color: "#1a1a2e", marginBottom: 20, lineHeight: 1.6 }}>{message}</div>
+      <div style={{ display: "flex", gap: 12 }}>
+        <button onClick={onCancel} style={{
+          flex: 1, padding: 12, border: "1.5px solid #e0e0e0", borderRadius: 10,
+          background: "#fff", fontSize: 14, cursor: "pointer", color: "#666",
+        }}>取消</button>
+        <button onClick={onConfirm} style={{
+          flex: 1, padding: 12, border: "none", borderRadius: 10,
+          background: "#e76f51", fontSize: 14, cursor: "pointer", color: "#fff", fontWeight: 600,
+        }}>确认删除</button>
+      </div>
+    </div>
+  </div>
+);
+
+// --- Overview Page ---
+const OverviewPage = ({ data, showTotal, setData }) => {
+  const rates = data.exchangeRates;
+  const tickers = useMemo(() => getAllTickers(data), [data]);
+  const [editingStrategy, setEditingStrategy] = useState(false);
+  const [drafts, setDrafts] = useState([]);
+
+  const { categories, toujiValue } = useMemo(() => {
+    const acctEntries = Object.entries(data.accounts);
+    let toujiVal = 0;
+    const cats = [];
+    acctEntries.forEach(([key, a]) => {
+      const val = toCNY(calcAccountValue(a, data), a.currency, rates);
+      if (key === "touji") { toujiVal = val; return; }
+      cats.push({ name: a.name, value: val });
+    });
+    const cashVal = calcCashCNY(data.cashAccount.items, rates);
+    cats.push({ name: "独立现金", value: cashVal });
+    const total = cats.reduce((s, c) => s + c.value, 0);
+    const colors = ["#e76f51", "#f4a261", "#e9c46a", "#2a9d8f", "#264653", "#6a4c93", "#1982c4", "#8ac926"];
+    return {
+      categories: cats.map((c, i) => ({ ...c, color: colors[i % colors.length], pct: total > 0 ? c.value / total : 0, total })),
+      toujiValue: toujiVal,
+    };
+  }, [data, rates]);
+
+  const startEditStrategy = () => { setDrafts([...(data.strategies || [])]); setEditingStrategy(true); };
+  const saveStrategies = () => {
+    setData(d => ({ ...d, strategies: drafts.filter(s => s.trim()) }));
+    setEditingStrategy(false);
+  };
+
+  return (
+    <div style={{ padding: "16px 16px 100px" }}>
+      <Card title="资产分布">
+        <div style={{ display: "flex", height: 12, borderRadius: 6, overflow: "hidden", marginBottom: 16 }}>
+          {categories.map((c, i) => (
+            <div key={i} style={{ width: `${(c.pct * 100).toFixed(1)}%`, background: c.color, transition: "width 0.5s ease" }} />
+          ))}
+        </div>
+        {categories.map((c, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: i < categories.length - 1 ? "1px solid #f8f8f8" : "none" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ width: 10, height: 10, borderRadius: 3, background: c.color }} />
+              <span style={{ fontSize: 14, color: "#333" }}>{c.name}</span>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 14, fontWeight: 600, fontFamily: "'SF Mono', monospace", color: "#1a1a2e" }}>
+                {showTotal ? `¥${fmt(c.value)}` : "••••"}
+              </div>
+              <div style={{ fontSize: 11, color: "#999" }}>{(c.pct * 100).toFixed(1)}%</div>
+            </div>
+          </div>
+        ))}
+      </Card>
+
+      {data.accounts.touji && (
+        <Card title="投机账户" extra="不计入总资产">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ width: 10, height: 10, borderRadius: 3, background: "#9b2226" }} />
+              <span style={{ fontSize: 14, color: "#666" }}>{data.accounts.touji.name}</span>
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 600, fontFamily: "'SF Mono', monospace", color: "#9b2226" }}>
+              {showTotal ? `¥${fmt(toujiValue)}` : "••••"}
+            </div>
+          </div>
+        </Card>
+      )}
+
+      <Card title="实时汇率" extra="自动获取">
+        <div style={{ display: "flex", gap: 12 }}>
+          {[["USD/CNY", rates.USD, 4], ["HKD/CNY", rates.HKD, 7]].map(([label, val, dec]) => (
+            <div key={label} style={{ flex: 1, background: "#f8f9fa", borderRadius: 12, padding: 12, textAlign: "center" }}>
+              <div style={{ fontSize: 11, color: "#999", marginBottom: 4 }}>{label}</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: "#0f3460", fontFamily: "'SF Mono', monospace" }}>{fmt(val, dec)}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {tickers.length > 0 && (
+        <Card title="美股实时报价" extra="自动获取">
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(tickers.length, 3)}, 1fr)`, gap: 8 }}>
+            {tickers.map(t => (
+              <div key={t} style={{ background: "#f8f9fa", borderRadius: 10, padding: "10px 8px", textAlign: "center" }}>
+                <div style={{ fontSize: 11, color: "#999", marginBottom: 2 }}>{t}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: "#0f3460", fontFamily: "'SF Mono', monospace" }}>
+                  ${showTotal ? fmt(getPrice(data, t)) : "••"}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <Card title="投资策略备忘" headerRight={
+        !editingStrategy ? (
+          <button onClick={startEditStrategy} style={{ background: "none", border: "none", fontSize: 12, color: "#0f3460", cursor: "pointer", fontWeight: 600 }}>编辑</button>
+        ) : (
+          <button onClick={saveStrategies} style={{ background: "#0f3460", border: "none", fontSize: 12, color: "#fff", cursor: "pointer", fontWeight: 600, borderRadius: 6, padding: "4px 10px" }}>保存</button>
+        )
+      }>
+        {!editingStrategy ? (
+          <div style={{ fontSize: 13, color: "#666", lineHeight: 1.8 }}>
+            {(data.strategies || []).map((s, i) => (
+              <p key={i} style={{ margin: "0 0 6px" }}>📌 {s}</p>
+            ))}
+            {(!data.strategies || data.strategies.length === 0) && <p style={{ color: "#ccc", margin: 0 }}>暂无策略，点击编辑添加</p>}
+          </div>
+        ) : (
+          <div>
+            {drafts.map((s, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                <input value={s} onChange={e => { const nd = [...drafts]; nd[i] = e.target.value; setDrafts(nd); }}
+                  style={{ ...inputStyle, fontSize: 13, padding: "8px 10px" }} placeholder="输入策略..." />
+                <button onClick={() => setDrafts(drafts.filter((_, j) => j !== i))} style={dangerBtnStyle}>✕</button>
+              </div>
+            ))}
+            <button onClick={() => setDrafts([...drafts, ""])} style={{
+              width: "100%", padding: 10, border: "1.5px dashed #ccc", borderRadius: 10,
+              background: "transparent", color: "#999", fontSize: 13, cursor: "pointer",
+            }}>+ 添加策略</button>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+};
+
+// --- Accounts Page ---
+const AccountsPage = ({ data, showTotal }) => {
+  const rates = data.exchangeRates;
+  const [expandedAcct, setExpandedAcct] = useState(null);
+
+  const acctEntries = Object.entries(data.accounts);
+
+  return (
+    <div style={{ padding: "16px 16px 100px" }}>
+      {acctEntries.map(([key, account]) => {
+        const isExpanded = expandedAcct === key;
+        const totalOrig = calcAccountValue(account, data);
+        const totalCNYVal = toCNY(totalOrig, account.currency, rates);
+        const sym = account.currency === "USD" ? "$" : account.currency === "HKD" ? "HK$" : "¥";
+
+        return (
+          <Card key={key} title={account.name} extra={account.platform}>
+            <div onClick={() => setExpandedAcct(isExpanded ? null : key)} style={{ cursor: "pointer" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                <span style={{ fontSize: 12, color: "#999" }}>总市值 ({account.currency})</span>
+                <span style={{ fontSize: 16, fontWeight: 700, color: "#0f3460", fontFamily: "'SF Mono', monospace" }}>
+                  {showTotal ? `${sym}${fmt(totalOrig)}` : "••••"}
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                <span style={{ fontSize: 11, color: "#bbb" }}>折合 CNY</span>
+                <span style={{ fontSize: 13, color: "#666", fontFamily: "'SF Mono', monospace" }}>
+                  {showTotal ? `¥${fmt(totalCNYVal)}` : "••••"}
+                </span>
+              </div>
+              <div style={{ textAlign: "center", fontSize: 10, color: "#ccc", paddingTop: 4 }}>{isExpanded ? "▲ 收起" : "▼ 展开详情"}</div>
+            </div>
+            {isExpanded && (
+              <div style={{ marginTop: 8, borderTop: "1px solid #f0f0f0", paddingTop: 8 }}>
+                {account.holdings.map((h, i) => {
+                  const price = account.type === "stock" ? getPrice(data, h.code) : 0;
+                  const mv = account.type === "fund" ? (h.marketValue || 0) : (h.shares || 0) * price;
+                  const cash = h.cashPosition || 0;
+                  return (
+                    <div key={i} style={{ padding: "8px 0", borderBottom: i < account.holdings.length - 1 ? "1px solid #f8f8f8" : "none" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                        <span style={{ fontSize: 14, fontWeight: 600 }}>{h.code}</span>
+                        <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'SF Mono', monospace" }}>
+                          {showTotal ? fmt(mv + cash) : "••••"}
+                        </span>
+                      </div>
+                      {account.type === "stock" && (
+                        <div style={{ fontSize: 11, color: "#999", display: "flex", justifyContent: "space-between" }}>
+                          <span>持仓: {h.shares}股 × {sym}{fmt(price)}</span>
+                          <span>现金: {sym}{fmt(cash)}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
+        );
+      })}
+
+      {/* Cash account */}
+      <Card title="现金账户" extra="多币种">
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+          <span style={{ fontSize: 12, color: "#999" }}>折合 CNY</span>
+          <span style={{ fontSize: 16, fontWeight: 700, color: "#2a9d8f", fontFamily: "'SF Mono', monospace" }}>
+            {showTotal ? `¥${fmt(calcCashCNY(data.cashAccount.items, rates))}` : "••••"}
+          </span>
+        </div>
+        {data.cashAccount.items.map((item, i) => {
+          const sym = item.currency === "USD" ? "$" : item.currency === "HKD" ? "HK$" : "¥";
+          const r = item.currency === "CNY" ? 1 : item.currency === "USD" ? rates.USD : rates.HKD;
+          return (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #f8f8f8" }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>{item.name}</div>
+                <div style={{ fontSize: 11, color: "#aaa" }}>{item.currency}</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 14, fontWeight: 600, fontFamily: "'SF Mono', monospace" }}>{showTotal ? `${sym}${fmt(item.balance)}` : "••••"}</div>
+                <div style={{ fontSize: 11, color: "#999" }}>{showTotal ? `≈ ¥${fmt(item.balance * r)}` : ""}</div>
+              </div>
+            </div>
+          );
+        })}
+      </Card>
+    </div>
+  );
+};
+
+// --- Edit Page ---
+const EditPage = ({ data, setData }) => {
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null); // { type, acctKey?, idx? }
+  const [addingHolding, setAddingHolding] = useState(null); // acctKey
+  const [newHolding, setNewHolding] = useState({ code: "", shares: 0, cashPosition: 0, marketValue: 0 });
+
+  const updateHolding = (acctKey, idx, field, val) => {
+    setData(d => {
+      const nd = deepClone(d);
+      nd.accounts[acctKey].holdings[idx][field] = parseFloat(val) || 0;
+      return nd;
+    });
+  };
+
+  const deleteHolding = (acctKey, idx) => {
+    setData(d => {
+      const nd = deepClone(d);
+      nd.accounts[acctKey].holdings.splice(idx, 1);
+      return nd;
+    });
+    setConfirmDelete(null);
+  };
+
+  const addHolding = (acctKey) => {
+    if (!newHolding.code.trim()) return;
+    setData(d => {
+      const nd = deepClone(d);
+      const acct = nd.accounts[acctKey];
+      if (acct.type === "stock") {
+        acct.holdings.push({ code: newHolding.code.trim().toUpperCase(), shares: newHolding.shares || 0, cashPosition: newHolding.cashPosition || 0, group: "" });
+      } else {
+        acct.holdings.push({ code: newHolding.code.trim(), marketValue: newHolding.marketValue || 0, group: "" });
+      }
+      return nd;
+    });
+    setAddingHolding(null);
+    setNewHolding({ code: "", shares: 0, cashPosition: 0, marketValue: 0 });
+  };
+
+  const deleteAccount = (acctKey) => {
+    setData(d => {
+      const nd = deepClone(d);
+      delete nd.accounts[acctKey];
+      return nd;
+    });
+    setConfirmDelete(null);
+  };
+
+  const [addingCash, setAddingCash] = useState(false);
+  const [newCashItem, setNewCashItem] = useState({ name: "", currency: "CNY", balance: 0 });
+
+  const updateCashField = (idx, field, val) => {
+    setData(d => {
+      const nd = deepClone(d);
+      nd.cashAccount.items[idx][field] = field === "balance" ? (parseFloat(val) || 0) : val;
+      return nd;
+    });
+  };
+
+  const deleteCashItem = (idx) => {
+    setData(d => {
+      const nd = deepClone(d);
+      nd.cashAccount.items.splice(idx, 1);
+      return nd;
+    });
+    setConfirmDelete(null);
+  };
+
+  const addCashItem = () => {
+    if (!newCashItem.name.trim()) return;
+    setData(d => {
+      const nd = deepClone(d);
+      nd.cashAccount.items.push({ name: newCashItem.name.trim(), currency: newCashItem.currency, balance: newCashItem.balance || 0 });
+      return nd;
+    });
+    setAddingCash(false);
+    setNewCashItem({ name: "", currency: "CNY", balance: 0 });
+  };
+
+  const handleSave = () => {
+    setSaving(true);
+    setTimeout(() => { setSaving(false); setSaved(true); setTimeout(() => setSaved(false), 2000); }, 500);
+  };
+
+  const handleSnapshot = () => {
+    const rates = data.exchangeRates;
+    let total = calcCashCNY(data.cashAccount.items, rates);
+    Object.values(data.accounts).forEach(a => { total += toCNY(calcAccountValue(a, data), a.currency, rates); });
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    // Simplified snapshot - store total and per-category
+    const entry = { date: dateStr, total: +total.toFixed(2) };
+    // Also store individual account values for the table
+    Object.entries(data.accounts).forEach(([k, a]) => {
+      entry[k] = +(toCNY(calcAccountValue(a, data), a.currency, rates)).toFixed(2);
+    });
+    entry.cash = +(calcCashCNY(data.cashAccount.items, rates)).toFixed(2);
+    setData(d => {
+      const newH = [...d.history];
+      const idx = newH.findIndex(h => h.date === dateStr);
+      if (idx >= 0) newH[idx] = entry; else newH.push(entry);
+      return { ...d, history: newH };
+    });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const acctEntries = Object.entries(data.accounts);
+
+  return (
+    <div style={{ padding: "16px 16px 120px" }}>
+      <div style={{ background: "#e8f5e9", borderRadius: 12, padding: 12, marginBottom: 8, fontSize: 13, color: "#2e7d32", display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 16 }}>✅</span><span>汇率和股票价格已自动获取，无需手动更新</span>
+      </div>
+      <div style={{ background: "#fff8e1", borderRadius: 12, padding: 12, marginBottom: 16, fontSize: 13, color: "#f57f17", display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 16 }}>💡</span><span>需手动更新：持仓股数、现金仓位、基金市值、现金余额</span>
+      </div>
+
+      {acctEntries.map(([acctKey, account]) => (
+        <Card key={acctKey} title={account.name} extra="🟡 手动更新"
+          headerRight={
+            <button onClick={() => setConfirmDelete({ type: "account", acctKey })}
+              style={{ ...dangerBtnStyle, fontSize: 18, padding: "0 4px", lineHeight: 1 }}>🗑</button>
+          }
+        >
+          {account.holdings.map((h, i) => {
+            const price = account.type === "stock" ? getPrice(data, h.code) : 0;
+            return (
+              <div key={i} style={{ marginBottom: 12, padding: "8px 0", borderBottom: "1px solid #f5f5f5" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: "#1a1a2e" }}>{h.code}</span>
+                    {account.type === "stock" && (
+                      <span style={{ fontSize: 11, color: "#2a9d8f", background: "#e8f5e9", borderRadius: 6, padding: "1px 6px" }}>
+                        ${fmt(price)}
+                      </span>
+                    )}
+                  </div>
+                  <button onClick={() => setConfirmDelete({ type: "holding", acctKey, idx: i })}
+                    style={dangerBtnStyle}>删除</button>
+                </div>
+                {account.type === "stock" ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div>
+                      <label style={labelStyle}>股票持仓 (股)</label>
+                      <input type="number" step="any" value={h.shares} onChange={e => updateHolding(acctKey, i, "shares", e.target.value)} style={inputStyle} />
+                    </div>
+                    <div>
+                      <label style={labelStyle}>现金仓位 ($)</label>
+                      <input type="number" step="any" value={h.cashPosition} onChange={e => updateHolding(acctKey, i, "cashPosition", e.target.value)} style={inputStyle} />
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <label style={labelStyle}>当前市值</label>
+                    <input type="number" step="any" value={h.marketValue} onChange={e => updateHolding(acctKey, i, "marketValue", e.target.value)} style={inputStyle} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Add holding */}
+          {addingHolding === acctKey ? (
+            <div style={{ background: "#f8f9fa", borderRadius: 12, padding: 12, marginTop: 4 }}>
+              <div style={{ marginBottom: 8 }}>
+                <label style={labelStyle}>{account.type === "stock" ? "股票代码" : "基金名称"}</label>
+                <input value={newHolding.code} onChange={e => setNewHolding({ ...newHolding, code: e.target.value })}
+                  placeholder={account.type === "stock" ? "如 AAPL" : "如 华夏沪深300"}
+                  style={{ ...inputStyle, fontSize: 13 }} />
+              </div>
+              {account.type === "stock" ? (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                  <div>
+                    <label style={labelStyle}>持仓 (股)</label>
+                    <input type="number" step="any" value={newHolding.shares} onChange={e => setNewHolding({ ...newHolding, shares: parseFloat(e.target.value) || 0 })} style={{ ...inputStyle, fontSize: 13 }} />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>现金仓位</label>
+                    <input type="number" step="any" value={newHolding.cashPosition} onChange={e => setNewHolding({ ...newHolding, cashPosition: parseFloat(e.target.value) || 0 })} style={{ ...inputStyle, fontSize: 13 }} />
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginBottom: 8 }}>
+                  <label style={labelStyle}>当前市值</label>
+                  <input type="number" step="any" value={newHolding.marketValue} onChange={e => setNewHolding({ ...newHolding, marketValue: parseFloat(e.target.value) || 0 })} style={{ ...inputStyle, fontSize: 13 }} />
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => { setAddingHolding(null); setNewHolding({ code: "", shares: 0, cashPosition: 0, marketValue: 0 }); }}
+                  style={{ flex: 1, padding: 10, border: "1px solid #ddd", borderRadius: 8, background: "#fff", fontSize: 13, cursor: "pointer", color: "#666" }}>取消</button>
+                <button onClick={() => addHolding(acctKey)}
+                  style={{ flex: 1, padding: 10, border: "none", borderRadius: 8, background: "#0f3460", fontSize: 13, cursor: "pointer", color: "#fff", fontWeight: 600 }}>添加</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => { setAddingHolding(acctKey); setNewHolding({ code: "", shares: 0, cashPosition: 0, marketValue: 0 }); }}
+              style={{ width: "100%", padding: 10, border: "1.5px dashed #ccc", borderRadius: 10, background: "transparent", color: "#999", fontSize: 13, cursor: "pointer", marginTop: 4 }}>
+              + 新增{account.type === "stock" ? "股票" : "基金"}
+            </button>
+          )}
+        </Card>
+      ))}
+
+      <Card title="现金账户" extra="🟡 手动更新">
+        {data.cashAccount.items.map((item, i) => (
+          <div key={i} style={{ marginBottom: 14, padding: "10px 0", borderBottom: "1px solid #f5f5f5" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ flex: 1, marginRight: 8 }}>
+                <label style={labelStyle}>账户名称</label>
+                <input value={item.name} onChange={e => updateCashField(i, "name", e.target.value)}
+                  style={{ ...inputStyle, fontSize: 13, padding: "8px 10px" }} />
+              </div>
+              <button onClick={() => setConfirmDelete({ type: "cash", idx: i })}
+                style={dangerBtnStyle}>删除</button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div>
+                <label style={labelStyle}>币种</label>
+                <select value={item.currency} onChange={e => updateCashField(i, "currency", e.target.value)}
+                  style={{ ...inputStyle, fontSize: 13, padding: "8px 10px", appearance: "auto", background: "#fafafa" }}>
+                  <option value="CNY">CNY (人民币)</option>
+                  <option value="USD">USD (美元)</option>
+                  <option value="HKD">HKD (港币)</option>
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle}>余额</label>
+                <input type="number" step="any" value={item.balance}
+                  onChange={e => updateCashField(i, "balance", e.target.value)} style={inputStyle} />
+              </div>
+            </div>
+          </div>
+        ))}
+
+        {/* Add new cash item */}
+        {addingCash ? (
+          <div style={{ background: "#f8f9fa", borderRadius: 12, padding: 12, marginTop: 4 }}>
+            <div style={{ marginBottom: 8 }}>
+              <label style={labelStyle}>账户名称</label>
+              <input value={newCashItem.name} onChange={e => setNewCashItem({ ...newCashItem, name: e.target.value })}
+                placeholder="如 招商银行活期" style={{ ...inputStyle, fontSize: 13 }} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+              <div>
+                <label style={labelStyle}>币种</label>
+                <select value={newCashItem.currency} onChange={e => setNewCashItem({ ...newCashItem, currency: e.target.value })}
+                  style={{ ...inputStyle, fontSize: 13, padding: "8px 10px", appearance: "auto", background: "#fafafa" }}>
+                  <option value="CNY">CNY (人民币)</option>
+                  <option value="USD">USD (美元)</option>
+                  <option value="HKD">HKD (港币)</option>
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle}>余额</label>
+                <input type="number" step="any" value={newCashItem.balance}
+                  onChange={e => setNewCashItem({ ...newCashItem, balance: parseFloat(e.target.value) || 0 })}
+                  style={{ ...inputStyle, fontSize: 13 }} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => { setAddingCash(false); setNewCashItem({ name: "", currency: "CNY", balance: 0 }); }}
+                style={{ flex: 1, padding: 10, border: "1px solid #ddd", borderRadius: 8, background: "#fff", fontSize: 13, cursor: "pointer", color: "#666" }}>取消</button>
+              <button onClick={addCashItem}
+                style={{ flex: 1, padding: 10, border: "none", borderRadius: 8, background: "#0f3460", fontSize: 13, cursor: "pointer", color: "#fff", fontWeight: 600 }}>添加</button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={() => setAddingCash(true)}
+            style={{ width: "100%", padding: 10, border: "1.5px dashed #ccc", borderRadius: 10, background: "transparent", color: "#999", fontSize: 13, cursor: "pointer", marginTop: 4 }}>
+            + 新增现金账户
+          </button>
+        )}
+      </Card>
+
+      <div style={{ display: "flex", gap: 12 }}>
+        <button onClick={handleSnapshot} style={{
+          flex: 1, padding: "14px", border: "2px solid #0f3460", borderRadius: 14,
+          background: "transparent", color: "#0f3460", fontSize: 15, fontWeight: 600, cursor: "pointer",
+        }}>📸 月度快照</button>
+        <button onClick={handleSave} disabled={saving} style={{
+          flex: 1, padding: "14px", border: "none", borderRadius: 14,
+          background: saved ? "#2a9d8f" : "linear-gradient(135deg, #0f3460, #1a1a2e)",
+          color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer", transition: "all 0.3s",
+        }}>{saving ? "保存中..." : saved ? "✅ 已保存" : "💾 保存数据"}</button>
+      </div>
+
+      {/* Data export/import */}
+      <Card title="数据管理" extra="备份与恢复">
+        <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+          <button onClick={() => {
+            const json = JSON.stringify(data, null, 2);
+            const blob = new Blob([json], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `asset-backup-${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }} style={{
+            flex: 1, padding: "12px", border: "1.5px solid #2a9d8f", borderRadius: 12,
+            background: "transparent", color: "#2a9d8f", fontSize: 14, fontWeight: 600, cursor: "pointer",
+          }}>📤 导出数据</button>
+          <label style={{
+            flex: 1, padding: "12px", border: "1.5px solid #f4a261", borderRadius: 12,
+            background: "transparent", color: "#f4a261", fontSize: 14, fontWeight: 600, cursor: "pointer",
+            textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            📥 导入数据
+            <input type="file" accept=".json" style={{ display: "none" }} onChange={e => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = (ev) => {
+                try {
+                  const parsed = JSON.parse(ev.target.result);
+                  if (parsed.accounts && parsed.cashAccount) {
+                    setData(parsed);
+                    setSaved(true);
+                    setTimeout(() => setSaved(false), 2000);
+                  } else {
+                    alert("文件格式不正确，请选择正确的备份文件");
+                  }
+                } catch (err) {
+                  alert("文件解析失败，请确认是有效的 JSON 文件");
+                }
+              };
+              reader.readAsText(file);
+              e.target.value = "";
+            }} />
+          </label>
+        </div>
+        <div style={{ fontSize: 11, color: "#bbb", lineHeight: 1.6 }}>
+          导出：将所有数据保存为 JSON 文件，可用于备份或迁移。
+          导入：从之前导出的 JSON 文件恢复数据，会覆盖当前数据。
+        </div>
+      </Card>
+
+      {/* Delete confirm modal */}
+      {confirmDelete && (
+        <ConfirmModal
+          message={confirmDelete.type === "account"
+            ? `确定要删除「${data.accounts[confirmDelete.acctKey]?.name}」整个账户吗？此操作不可撤销。`
+            : confirmDelete.type === "cash"
+            ? `确定要删除现金账户「${data.cashAccount.items[confirmDelete.idx]?.name} (${data.cashAccount.items[confirmDelete.idx]?.currency})」吗？`
+            : `确定要删除「${data.accounts[confirmDelete.acctKey]?.holdings[confirmDelete.idx]?.code}」吗？`}
+          onConfirm={() => {
+            if (confirmDelete.type === "account") deleteAccount(confirmDelete.acctKey);
+            else if (confirmDelete.type === "cash") deleteCashItem(confirmDelete.idx);
+            else deleteHolding(confirmDelete.acctKey, confirmDelete.idx);
+          }}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
+    </div>
+  );
+};
+
+// --- Line Chart ---
+const LineChart = ({ dataPoints, showTotal, height = 200 }) => {
+  const [tooltip, setTooltip] = useState(null);
+  if (!dataPoints || dataPoints.length === 0) return <div style={{ textAlign: "center", color: "#ccc", padding: 20 }}>暂无数据</div>;
+  if (dataPoints.length === 1) {
+    return (
+      <div style={{ textAlign: "center", padding: 20 }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: "#0f3460", fontFamily: "'SF Mono', monospace" }}>
+          {showTotal ? `¥${fmt(dataPoints[0].total, 0)}` : "••••"}
+        </div>
+        <div style={{ fontSize: 11, color: "#999", marginTop: 4 }}>{dataPoints[0].date}</div>
+      </div>
+    );
+  }
+
+  const padX = 45, padR = 16, padTop = 20, padBot = 30;
+  const width = 360;
+  const chartW = width - padX - padR, chartH = height - padTop - padBot;
+  const values = dataPoints.map(d => d.total);
+  const minVal = Math.min(...values) * 0.95, maxVal = Math.max(...values) * 1.05;
+  const range = maxVal - minVal || 1;
+
+  const points = dataPoints.map((d, i) => ({
+    x: padX + (i / (dataPoints.length - 1)) * chartW,
+    y: padTop + chartH - ((d.total - minVal) / range) * chartH,
+    ...d,
+  }));
+
+  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+  const areaPath = linePath + ` L${points[points.length - 1].x},${padTop + chartH} L${points[0].x},${padTop + chartH} Z`;
+
+  const yTicks = [0, 1, 2, 3].map(i => ({ val: minVal + (range * i) / 3, y: padTop + chartH - (i / 3) * chartH }));
+
+  const xLabelIndices = [];
+  if (dataPoints.length <= 6) dataPoints.forEach((_, i) => xLabelIndices.push(i));
+  else {
+    xLabelIndices.push(0);
+    const step = Math.ceil(dataPoints.length / 5);
+    for (let i = step; i < dataPoints.length - 1; i += step) xLabelIndices.push(i);
+    xLabelIndices.push(dataPoints.length - 1);
+  }
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: "auto", touchAction: "none" }}>
+      {yTicks.map((t, i) => (
+        <g key={i}>
+          <line x1={padX} y1={t.y} x2={width - padR} y2={t.y} stroke="#f0f0f0" strokeWidth={1} />
+          <text x={padX - 6} y={t.y + 3} textAnchor="end" fill="#bbb" fontSize={9} fontFamily="'SF Mono', monospace">
+            {showTotal ? `${(t.val / 10000).toFixed(1)}w` : "•"}
+          </text>
+        </g>
+      ))}
+      <defs>
+        <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#e9c46a" stopOpacity="0.3" />
+          <stop offset="100%" stopColor="#e9c46a" stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      <path d={areaPath} fill="url(#areaGrad)" />
+      <path d={linePath} fill="none" stroke="#e9c46a" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />
+      {points.map((p, i) => (
+        <g key={i}>
+          <circle cx={p.x} cy={p.y} r={14} fill="transparent"
+            onMouseEnter={() => setTooltip(i)} onMouseLeave={() => setTooltip(null)}
+            onTouchStart={e => { e.preventDefault(); setTooltip(i); }}
+            onTouchEnd={() => setTimeout(() => setTooltip(null), 2000)} />
+          <circle cx={p.x} cy={p.y} r={tooltip === i ? 5 : 3} fill={tooltip === i ? "#e76f51" : "#e9c46a"} stroke="#fff" strokeWidth={2} />
+        </g>
+      ))}
+      {tooltip !== null && points[tooltip] && (
+        <g>
+          <line x1={points[tooltip].x} y1={padTop} x2={points[tooltip].x} y2={padTop + chartH} stroke="#e9c46a" strokeWidth={1} strokeDasharray="3,3" opacity={0.5} />
+          <rect x={Math.max(2, Math.min(points[tooltip].x - 52, width - 106))} y={points[tooltip].y - 34} width={104} height={24} rx={6} fill="#1a1a2e" opacity={0.9} />
+          <text x={Math.max(54, Math.min(points[tooltip].x, width - 54))} y={points[tooltip].y - 18} textAnchor="middle" fill="#fff" fontSize={10} fontFamily="'SF Mono', monospace" fontWeight="600">
+            {points[tooltip].date} {showTotal ? `¥${fmt(points[tooltip].total, 0)}` : "••••"}
+          </text>
+        </g>
+      )}
+      {xLabelIndices.map(i => (
+        <text key={i} x={points[i].x} y={height - 6} textAnchor="middle" fill="#999" fontSize={9}>
+          {dataPoints[i].date.length > 5 ? dataPoints[i].date.slice(2) : dataPoints[i].date}
+        </text>
+      ))}
+    </svg>
+  );
+};
+
+// --- History Page ---
+const HistoryPage = ({ data, showTotal }) => {
+  const history = data.history || [];
+  const [timeRange, setTimeRange] = useState("year");
+
+  const filteredHistory = useMemo(() => {
+    if (timeRange === "all") return history;
+    const yr = new Date().getFullYear().toString();
+    return history.filter(h => h.date.startsWith(yr));
+  }, [history, timeRange]);
+
+  const latestChange = useMemo(() => {
+    if (filteredHistory.length < 2) return null;
+    const curr = filteredHistory[filteredHistory.length - 1].total;
+    const prev = filteredHistory[filteredHistory.length - 2].total;
+    const diff = curr - prev;
+    return { diff, pct: prev > 0 ? (diff / prev) * 100 : 0, positive: diff >= 0 };
+  }, [filteredHistory]);
+
+  const btnStyle = (active) => ({
+    flex: 1, padding: "8px 0", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600,
+    cursor: "pointer", background: active ? "#0f3460" : "#f0f0f0", color: active ? "#fff" : "#999",
+  });
+
+  // Dynamically get column keys from history entries (excluding date and total)
+  const colKeys = useMemo(() => {
+    const keys = new Set();
+    history.forEach(h => Object.keys(h).forEach(k => { if (k !== "date" && k !== "total") keys.add(k); }));
+    return [...keys];
+  }, [history]);
+
+  // Map keys to display names
+  const acctNames = data.accounts;
+  const getColName = (key) => {
+    if (key === "cash") return "现金";
+    if (acctNames[key]) return acctNames[key].name;
+    return key;
+  };
+
+  return (
+    <div style={{ padding: "16px 16px 100px" }}>
+      <Card title="资产趋势">
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, background: "#f8f8f8", borderRadius: 10, padding: 4 }}>
+          <button onClick={() => setTimeRange("year")} style={btnStyle(timeRange === "year")}>当年</button>
+          <button onClick={() => setTimeRange("all")} style={btnStyle(timeRange === "all")}>有记录以来</button>
+        </div>
+
+        {latestChange && showTotal && (
+          <div style={{
+            display: "flex", justifyContent: "center", gap: 16, marginBottom: 12,
+            padding: "8px 0", background: latestChange.positive ? "#f0faf0" : "#faf0f0", borderRadius: 10,
+          }}>
+            <span style={{ fontSize: 13, color: "#666" }}>月环比</span>
+            <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'SF Mono', monospace", color: latestChange.positive ? "#2a9d8f" : "#e76f51" }}>
+              {latestChange.positive ? "+" : ""}{fmt(latestChange.diff, 0)}
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: latestChange.positive ? "#2a9d8f" : "#e76f51" }}>
+              {latestChange.positive ? "↑" : "↓"}{Math.abs(latestChange.pct).toFixed(1)}%
+            </span>
+          </div>
+        )}
+
+        <LineChart dataPoints={filteredHistory} showTotal={showTotal} height={220} />
+      </Card>
+
+      <Card title="月度明细" extra={timeRange === "year" ? "当年" : "全部"}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: "2px solid #f0f0f0" }}>
+                <th style={{ padding: "8px 4px", textAlign: "left", color: "#999", fontWeight: 500, fontSize: 11 }}>日期</th>
+                {colKeys.map(k => (
+                  <th key={k} style={{ padding: "8px 4px", textAlign: "right", color: "#999", fontWeight: 500, fontSize: 11, whiteSpace: "nowrap" }}>{getColName(k)}</th>
+                ))}
+                <th style={{ padding: "8px 4px", textAlign: "right", color: "#999", fontWeight: 500, fontSize: 11 }}>总计</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredHistory.map((h, i) => (
+                <tr key={i} style={{ borderBottom: "1px solid #f8f8f8" }}>
+                  <td style={{ padding: "10px 4px", fontWeight: 500, color: "#1a1a2e", whiteSpace: "nowrap" }}>{h.date}</td>
+                  {colKeys.map(k => (
+                    <td key={k} style={{ padding: "10px 4px", textAlign: "right", fontFamily: "'SF Mono', monospace", color: "#666" }}>
+                      {showTotal ? fmt(h[k] || 0, 0) : "••"}
+                    </td>
+                  ))}
+                  <td style={{ padding: "10px 4px", textAlign: "right", fontWeight: 700, fontFamily: "'SF Mono', monospace", color: "#0f3460" }}>
+                    {showTotal ? fmt(h.total, 0) : "••"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+// --- Main App ---
+function AssetManager() {
+  const [data, setData] = useState(DEFAULT_DATA);
+  const [activeTab, setActiveTab] = useState("overview");
+  const [showTotal, setShowTotal] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [fetching, setFetching] = useState(false);
+  const [lastFetch, setLastFetch] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = (() => { const v = localStorage.getItem("asset-data-v3"); return v ? { value: v } : null; })();
+        if (result && result.value) {
+          const parsed = JSON.parse(result.value);
+          if (!parsed.stockPrices) parsed.stockPrices = { ...DEFAULT_DATA.stockPrices };
+          if (!parsed.strategies) parsed.strategies = [...DEFAULT_DATA.strategies];
+          if (!parsed.cashAccount) parsed.cashAccount = parsed.accounts?.cash ? { items: parsed.accounts.cash.items } : DEFAULT_DATA.cashAccount;
+          // Remove legacy cash from accounts
+          if (parsed.accounts?.cash) delete parsed.accounts.cash;
+          setData(parsed);
+          if (parsed.lastFetchTime) setLastFetch(parsed.lastFetchTime);
+        }
+      } catch (e) {}
+      setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (loading) return;
+    (async () => { try { localStorage.setItem("asset-data-v3", JSON.stringify(data)); } catch (e) {} })();
+  }, [data, loading]);
+
+  const refreshMarketData = useCallback(async () => {
+    setFetching(true);
+    let ratesOk = false, pricesOk = false;
+
+    const newRates = await fetchExchangeRates();
+    if (newRates) { setData(d => ({ ...d, exchangeRates: newRates })); ratesOk = true; }
+
+    const tickers = getAllTickers(data);
+    if (tickers.length > 0) {
+      const newPrices = await fetchStockPrices(tickers);
+      if (Object.keys(newPrices).length > 0) {
+        setData(d => ({ ...d, stockPrices: { ...d.stockPrices, ...newPrices } }));
+        pricesOk = true;
+      }
+    } else {
+      pricesOk = true; // no tickers to fetch
+    }
+
+    const now = new Date();
+    const timeStr = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    const statusStr = (ratesOk && pricesOk) ? timeStr
+      : ratesOk ? `${timeStr} (股票获取失败)` : pricesOk ? `${timeStr} (汇率获取失败)` : `${timeStr} (获取失败，使用缓存)`;
+    setLastFetch(statusStr);
+    setData(d => ({ ...d, lastFetchTime: statusStr }));
+    setFetching(false);
+  }, [data]);
+
+  useEffect(() => { if (!loading) refreshMarketData(); }, [loading]);
+
+  const totalCNY = useMemo(() => {
+    const rates = data.exchangeRates;
+    let total = calcCashCNY(data.cashAccount.items, rates);
+    Object.entries(data.accounts).forEach(([key, a]) => {
+      if (key === "touji") return; // 投机账户不计入总资产
+      total += toCNY(calcAccountValue(a, data), a.currency, rates);
+    });
+    return total;
+  }, [data]);
+
+  if (loading) {
+    return (
+      <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100vh", background: "#f5f5f7" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>💰</div>
+          <div style={{ color: "#999", fontSize: 14 }}>加载中...</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      maxWidth: 430, margin: "0 auto", minHeight: "100vh",
+      background: "#f5f5f7", fontFamily: "-apple-system, 'SF Pro Text', 'PingFang SC', sans-serif",
+      WebkitFontSmoothing: "antialiased",
+    }}>
+      <Header totalCNY={totalCNY} showTotal={showTotal} setShowTotal={setShowTotal}
+        fetching={fetching} onRefresh={refreshMarketData} lastFetch={lastFetch} />
+
+      {activeTab === "overview" && <OverviewPage data={data} showTotal={showTotal} setData={setData} />}
+      {activeTab === "accounts" && <AccountsPage data={data} showTotal={showTotal} />}
+      {activeTab === "edit" && <EditPage data={data} setData={setData} />}
+      {activeTab === "history" && <HistoryPage data={data} showTotal={showTotal} />}
+
+      <TabBar active={activeTab} setActive={setActiveTab} />
+    </div>
+  );
+}
+
+    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(AssetManager));
+  </script>
+</body>
+</html>
