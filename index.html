@@ -141,15 +141,26 @@ async function fetchExchangeRates() {
 
 async function fetchStockPrices(tickers) {
   const prices = {};
+
+  // Strategy 1: Try Yahoo Finance via public CORS proxies
+  const proxyUrls = [
+    (t) => `https://corsproxy.io/?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=1d`)}`,
+    (t) => `https://api.allorigins.win/raw?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=1d`)}`,
+  ];
+
   await Promise.all(tickers.map(async (t) => {
-    try {
-      const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=1d`);
-      if (!res.ok) throw new Error();
-      const j = await res.json();
-      const p = j.chart?.result?.[0]?.meta?.regularMarketPrice;
-      if (p) prices[t] = p;
-    } catch (e) { console.warn(`Stock fetch failed: ${t}`, e); }
+    for (const makeUrl of proxyUrls) {
+      if (prices[t]) break; // already got it
+      try {
+        const res = await fetch(makeUrl(t), { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) continue;
+        const j = await res.json();
+        const p = j.chart?.result?.[0]?.meta?.regularMarketPrice;
+        if (p) { prices[t] = p; break; }
+      } catch (e) { /* try next proxy */ }
+    }
   }));
+
   return prices;
 }
 
