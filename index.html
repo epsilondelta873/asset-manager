@@ -139,28 +139,24 @@ async function fetchExchangeRates() {
   return null;
 }
 
+// Finnhub API - 免费，支持CORS，浏览器直接调用
+// 在 https://finnhub.io/register 免费注册获取 API Key
+const FINNHUB_API_KEY = "d73s5rhr01qjjol45cegd73s5rhr01qjjol45cf0"; // ← 替换为你自己的 Key
+
 async function fetchStockPrices(tickers) {
   const prices = {};
-
-  // Strategy 1: Try Yahoo Finance via public CORS proxies
-  const proxyUrls = [
-    (t) => `https://corsproxy.io/?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=1d`)}`,
-    (t) => `https://api.allorigins.win/raw?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=1d`)}`,
-  ];
-
+  if (FINNHUB_API_KEY === "YOUR_FINNHUB_API_KEY") {
+    console.warn("请先设置 Finnhub API Key");
+    return prices;
+  }
   await Promise.all(tickers.map(async (t) => {
-    for (const makeUrl of proxyUrls) {
-      if (prices[t]) break; // already got it
-      try {
-        const res = await fetch(makeUrl(t), { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) continue;
-        const j = await res.json();
-        const p = j.chart?.result?.[0]?.meta?.regularMarketPrice;
-        if (p) { prices[t] = p; break; }
-      } catch (e) { /* try next proxy */ }
-    }
+    try {
+      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${t}&token=${FINNHUB_API_KEY}`);
+      if (!res.ok) throw new Error();
+      const j = await res.json();
+      if (j.c && j.c > 0) prices[t] = j.c; // c = current price
+    } catch (e) { console.warn(`Stock fetch failed: ${t}`, e); }
   }));
-
   return prices;
 }
 
@@ -1099,7 +1095,9 @@ function AssetManager() {
 
     const now = new Date();
     const timeStr = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-    const statusStr = (ratesOk && pricesOk) ? timeStr
+    const noKey = FINNHUB_API_KEY === "YOUR_FINNHUB_API_KEY";
+    const statusStr = noKey ? `${timeStr} (请设置 Finnhub API Key)`
+      : (ratesOk && pricesOk) ? timeStr
       : ratesOk ? `${timeStr} (股票获取失败)` : pricesOk ? `${timeStr} (汇率获取失败)` : `${timeStr} (获取失败，使用缓存)`;
     setLastFetch(statusStr);
     setData(d => ({ ...d, lastFetchTime: statusStr }));
