@@ -15,17 +15,31 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="./asset-helpers.js"></script>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useEffect, useCallback, useMemo } = React;
+    const {
+      toCNY,
+      fromCNY,
+      normalizeLiquidCashItems,
+      migrateAccountsData,
+      calcLiquidCashCNY,
+      calcAccountDisplayValue,
+      normalizeStockCode,
+      getHoldingPriceKey,
+      getHoldingPrice,
+      getAccountHoldingRatios,
+      makeLiquidCashItem,
+    } = window.AssetHelpers;
 
 const EXCHANGE_RATES_DEFAULT = { USD: 6.91185, HKD: 0.8824194 };
 
 const DEFAULT_DATA = {
   exchangeRates: { ...EXCHANGE_RATES_DEFAULT },
-  stockPrices: { QLD: 57.91, IBIT: 37.29, QQQM: 231.34, BOXX: 116.11, KORU: 269.5 },
+  stockPrices: { "US:QLD": 57.91, "US:IBIT": 37.29, "US:QQQM": 231.34, "US:BOXX": 116.11, "US:KORU": 269.5 },
   lastFetchTime: null,
   strategies: [
     "每月第一个周四各定投100刀，不满1股存入现金仓位，每年平衡一次",
@@ -34,21 +48,21 @@ const DEFAULT_DATA = {
   ],
   accounts: {
     daodaozhijian: {
-      name: "大道至简", platform: "嘉信", currency: "USD", type: "stock", liquidCash: 0,
+      name: "大道至简", platform: "嘉信", currency: "USD", type: "stock", liquidCashItems: [],
       holdings: [
-        { code: "QLD", shares: 2, cashPosition: 367.03, group: "投资-进攻" },
-        { code: "IBIT", shares: 0, cashPosition: 500, group: "投资-进攻" },
+        { code: "QLD", market: "US", shares: 2, cashPosition: 367.03, group: "投资-进攻" },
+        { code: "IBIT", market: "US", shares: 0, cashPosition: 500, group: "投资-进攻" },
       ],
     },
     wenjian: {
-      name: "稳健投资", platform: "汇丰", currency: "USD", type: "stock", liquidCash: 0,
+      name: "稳健投资", platform: "汇丰", currency: "USD", type: "stock", liquidCashItems: [],
       holdings: [
-        { code: "QQQM", shares: 0, cashPosition: 0, group: "投资-进攻" },
-        { code: "BOXX", shares: 2, cashPosition: 0, group: "投资-进攻" },
+        { code: "QQQM", market: "US", shares: 0, cashPosition: 0, group: "投资-进攻" },
+        { code: "BOXX", market: "US", shares: 2, cashPosition: 0, group: "投资-进攻" },
       ],
     },
     zhifubao: {
-      name: "支付宝场外", platform: "支付宝", currency: "CNY", type: "fund", liquidCash: 0,
+      name: "支付宝场外", platform: "支付宝", currency: "CNY", type: "fund", liquidCashItems: [],
       holdings: [
         { code: "诺安全球黄金", marketValue: 6029.33, group: "支付宝场外" },
         { code: "华宝纳斯达克", marketValue: 6973.37, group: "支付宝场外" },
@@ -57,16 +71,16 @@ const DEFAULT_DATA = {
       ],
     },
     zhifubaoOther: {
-      name: "汇丰-灵活智投", platform: "汇丰", currency: "HKD", type: "fund", liquidCash: 0,
+      name: "汇丰-灵活智投", platform: "汇丰", currency: "HKD", type: "fund", liquidCashItems: [],
       holdings: [
         { code: "灵活智投", marketValue: 184.21, group: "其他" },
       ],
     },
     touji: {
-      name: "投机账户", platform: "盈透", currency: "USD", type: "stock", liquidCash: 0,
+      name: "投机账户", platform: "盈透", currency: "USD", type: "stock", liquidCashItems: [],
       holdings: [
-        { code: "QLD", shares: 1.4265, cashPosition: 0, group: "其他" },
-        { code: "KORU", shares: 1.1845, cashPosition: 265.42, group: "其他" },
+        { code: "QLD", market: "US", shares: 1.4265, cashPosition: 0, group: "其他" },
+        { code: "KORU", market: "US", shares: 1.1845, cashPosition: 265.42, group: "其他" },
       ],
     },
   },
@@ -90,18 +104,13 @@ const fmt = (n, decimals = 2) => {
   if (n === undefined || n === null || isNaN(n)) return "0.00";
   return Number(n).toLocaleString("zh-CN", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 };
-const getPrice = (data, code) => data.stockPrices?.[code] ?? 0;
 const deepClone = (o) => JSON.parse(JSON.stringify(o));
+const getCurrencySymbol = (currency) => currency === "USD" ? "$" : currency === "HKD" ? "HK$" : "¥";
+const getHoldingMarketCurrency = (holding) => (holding.market === "HK" ? "HKD" : "USD");
+const getHoldingPriceSymbol = (holding, account) => getCurrencySymbol(account.type === "stock" ? getHoldingMarketCurrency(holding) : account.currency);
 
 function calcAccountValue(account, data) {
-  let total = 0;
-  for (const h of (account.holdings || [])) {
-    if (account.type === "fund") total += h.marketValue || 0;
-    else total += (h.shares || 0) * getPrice(data, h.code);
-    // 注意：cashPosition 是现金仓位备忘，不计入账户价值
-  }
-  total += account.liquidCash || 0; // 流动现金计入账户价值
-  return total;
+  return calcAccountDisplayValue(account, data);
 }
 
 function calcCashCNY(items, rates) {
@@ -113,20 +122,45 @@ function calcCashCNY(items, rates) {
   return total;
 }
 
-function toCNY(v, cur, rates) {
-  if (cur === "CNY") return v;
-  if (cur === "USD") return v * (rates.USD || 6.91);
-  if (cur === "HKD") return v * (rates.HKD || 0.88);
-  return v;
+function getAccountLiquidCashItems(account) {
+  return normalizeLiquidCashItems(account || {});
 }
 
-// Dynamically collect all stock tickers that need price fetching
-function getAllTickers(data) {
-  const set = new Set();
-  Object.values(data.accounts).forEach(a => {
-    if (a.type === "stock") a.holdings.forEach(h => set.add(h.code));
+function getAccountLiquidCashTotal(account, rates) {
+  return fromCNY(calcLiquidCashCNY(getAccountLiquidCashItems(account), rates), account.currency, rates);
+}
+
+function normalizeLoadedData(rawData) {
+  const parsed = deepClone(rawData || DEFAULT_DATA);
+
+  if (!parsed.stockPrices) parsed.stockPrices = { ...DEFAULT_DATA.stockPrices };
+  if (!parsed.strategies) parsed.strategies = [...DEFAULT_DATA.strategies];
+  if (!parsed.cashAccount) parsed.cashAccount = parsed.accounts?.cash ? { items: parsed.accounts.cash.items } : deepClone(DEFAULT_DATA.cashAccount);
+  if (!parsed.history) parsed.history = [...DEFAULT_DATA.history];
+
+  if (parsed.accounts?.cash) delete parsed.accounts.cash;
+  parsed.accounts = migrateAccountsData(parsed.accounts || DEFAULT_DATA.accounts);
+
+  return parsed;
+}
+
+function getStockQuoteTargets(data) {
+  const usMap = new Map();
+  const hkMap = new Map();
+
+  Object.values(data.accounts).forEach((account) => {
+    if (account.type !== "stock") return;
+    account.holdings.forEach((holding) => {
+      const key = getHoldingPriceKey(holding);
+      if (holding.market === "HK") hkMap.set(key, holding);
+      else usMap.set(key, holding);
+    });
   });
-  return [...set];
+
+  return {
+    us: [...usMap.values()],
+    hk: [...hkMap.values()],
+  };
 }
 
 // --- API ---
@@ -144,21 +178,58 @@ async function fetchExchangeRates() {
 // Finnhub API - 免费，支持CORS，浏览器直接调用
 // 在 https://finnhub.io/register 免费注册获取 API Key
 const FINNHUB_API_KEY = "d73s5rhr01qjjol45cegd73s5rhr01qjjol45cf0"; // ← 替换为你自己的 Key
+const ITICK_API_TOKEN = "12740f2466064833a52dacb3f4608fabb5c19489198647c28944474866582acf"; // ← 注册 iTick 免费版后填入 Token
 
-async function fetchStockPrices(tickers) {
+async function fetchUSStockPrices(holdings) {
   const prices = {};
-  if (FINNHUB_API_KEY === "YOUR_FINNHUB_API_KEY") {
+  if (holdings.length === 0) return prices;
+  if (!FINNHUB_API_KEY || FINNHUB_API_KEY === "YOUR_FINNHUB_API_KEY") {
     console.warn("请先设置 Finnhub API Key");
     return prices;
   }
-  await Promise.all(tickers.map(async (t) => {
+
+  await Promise.all(holdings.map(async (holding) => {
     try {
-      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${t}&token=${FINNHUB_API_KEY}`);
+      const symbol = normalizeStockCode(holding.code, "US");
+      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_API_KEY}`);
       if (!res.ok) throw new Error();
       const j = await res.json();
-      if (j.c && j.c > 0) prices[t] = j.c; // c = current price
-    } catch (e) { console.warn(`Stock fetch failed: ${t}`, e); }
+      if (j.c && j.c > 0) prices[getHoldingPriceKey(holding)] = j.c;
+    } catch (e) { console.warn(`US stock fetch failed: ${holding.code}`, e); }
   }));
+
+  return prices;
+}
+
+async function fetchHKStockPrices(holdings) {
+  const prices = {};
+  if (holdings.length === 0) return prices;
+  if (!ITICK_API_TOKEN) {
+    console.warn("请先设置 iTick Token");
+    return prices;
+  }
+
+  try {
+    const codes = holdings.map((holding) => normalizeStockCode(holding.code, "HK")).join(",");
+    const res = await fetch(`https://api.itick.org/stock/quotes?region=HK&codes=${codes}`, {
+      headers: {
+        accept: "application/json",
+        token: ITICK_API_TOKEN,
+      },
+    });
+    if (!res.ok) throw new Error();
+    const json = await res.json();
+    if (json.code !== 0 || !json.data) throw new Error(json.msg || "Invalid iTick response");
+
+    holdings.forEach((holding) => {
+      const normalizedCode = normalizeStockCode(holding.code, "HK");
+      const quote = json.data?.[normalizedCode];
+      if (quote?.ld && quote.ld > 0) prices[getHoldingPriceKey(holding)] = quote.ld;
+    });
+  } catch (e) {
+    console.warn("HK stock fetch failed:", e);
+  }
+
   return prices;
 }
 
@@ -279,7 +350,8 @@ const ConfirmModal = ({ message, onConfirm, onCancel }) => (
 // --- Overview Page ---
 const OverviewPage = ({ data, showTotal, setData }) => {
   const rates = data.exchangeRates;
-  const tickers = useMemo(() => getAllTickers(data), [data]);
+  const quoteTargets = useMemo(() => getStockQuoteTargets(data), [data]);
+  const allQuoteTargets = useMemo(() => [...quoteTargets.us, ...quoteTargets.hk], [quoteTargets]);
   const [editingStrategy, setEditingStrategy] = useState(false);
   const [drafts, setDrafts] = useState([]);
 
@@ -357,14 +429,14 @@ const OverviewPage = ({ data, showTotal, setData }) => {
         </div>
       </Card>
 
-      {tickers.length > 0 && (
-        <Card title="美股实时报价" extra="自动获取">
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(tickers.length, 3)}, 1fr)`, gap: 8 }}>
-            {tickers.map(t => (
-              <div key={t} style={{ background: "#f8f9fa", borderRadius: 10, padding: "10px 8px", textAlign: "center" }}>
-                <div style={{ fontSize: 11, color: "#999", marginBottom: 2 }}>{t}</div>
+      {allQuoteTargets.length > 0 && (
+        <Card title="股票实时报价" extra="自动获取">
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(allQuoteTargets.length, 3)}, 1fr)`, gap: 8 }}>
+            {allQuoteTargets.map(holding => (
+              <div key={getHoldingPriceKey(holding)} style={{ background: "#f8f9fa", borderRadius: 10, padding: "10px 8px", textAlign: "center" }}>
+                <div style={{ fontSize: 11, color: "#999", marginBottom: 2 }}>{holding.code} · {holding.market}</div>
                 <div style={{ fontSize: 15, fontWeight: 700, color: "#0f3460", fontFamily: "'SF Mono', monospace" }}>
-                  ${showTotal ? fmt(getPrice(data, t)) : "••"}
+                  {getCurrencySymbol(getHoldingMarketCurrency(holding))}{showTotal ? fmt(getHoldingPrice(data, holding)) : "••"}
                 </div>
               </div>
             ))}
@@ -419,7 +491,10 @@ const AccountsPage = ({ data, showTotal }) => {
         const isExpanded = expandedAcct === key;
         const totalOrig = calcAccountValue(account, data);
         const totalCNYVal = toCNY(totalOrig, account.currency, rates);
-        const sym = account.currency === "USD" ? "$" : account.currency === "HKD" ? "HK$" : "¥";
+        const sym = getCurrencySymbol(account.currency);
+        const liquidCashItems = getAccountLiquidCashItems(account);
+        const liquidCashTotal = getAccountLiquidCashTotal(account, rates);
+        const holdingRatios = getAccountHoldingRatios(account, data);
 
         return (
           <Card key={key} title={account.name} extra={account.platform}>
@@ -441,32 +516,57 @@ const AccountsPage = ({ data, showTotal }) => {
             {isExpanded && (
               <div style={{ marginTop: 8, borderTop: "1px solid #f0f0f0", paddingTop: 8 }}>
                 {account.holdings.map((h, i) => {
-                  const price = account.type === "stock" ? getPrice(data, h.code) : 0;
+                  const price = account.type === "stock" ? getHoldingPrice(data, h) : 0;
                   const mv = account.type === "fund" ? (h.marketValue || 0) : (h.shares || 0) * price;
                   const cash = h.cashPosition || 0;
+                  const holdingSym = getHoldingPriceSymbol(h, account);
                   return (
                     <div key={i} style={{ padding: "8px 0", borderBottom: "1px solid #f8f8f8" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                        <span style={{ fontSize: 14, fontWeight: 600 }}>{h.code}</span>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                          <span style={{ fontSize: 14, fontWeight: 600 }}>{h.code}{account.type === "stock" ? ` · ${h.market}` : ""}</span>
+                          <span style={{ fontSize: 11, color: "#999" }}>{showTotal ? `${fmt((holdingRatios[i] || 0) * 100, 1)}%` : "••"}</span>
+                        </div>
                         <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'SF Mono', monospace" }}>
-                          {showTotal ? fmt(mv) : "••••"}
+                          {showTotal ? `${holdingSym}${fmt(mv)}` : "••••"}
                         </span>
                       </div>
                       {account.type === "stock" && (
                         <div style={{ fontSize: 11, color: "#999", display: "flex", justifyContent: "space-between" }}>
-                          <span>持仓: {h.shares}股 × {sym}{fmt(price)}</span>
+                          <span>持仓: {h.shares}股 × {holdingSym}{fmt(price)}</span>
                           {cash > 0 && <span style={{ color: "#bbb" }}>现金仓位备忘: {sym}{fmt(cash)}</span>}
                         </div>
                       )}
                     </div>
                   );
                 })}
-                {/* Liquid cash */}
-                <div style={{ padding: "10px 0 4px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 13, fontWeight: 500, color: "#2a9d8f" }}>💰 流动现金</span>
-                  <span style={{ fontSize: 14, fontWeight: 600, color: "#2a9d8f", fontFamily: "'SF Mono', monospace" }}>
-                    {showTotal ? `${sym}${fmt(account.liquidCash || 0)}` : "••••"}
-                  </span>
+                <div style={{ padding: "10px 0 4px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: liquidCashItems.length > 0 ? 8 : 0 }}>
+                    <span style={{ fontSize: 13, fontWeight: 500, color: "#2a9d8f" }}>💰 流动现金</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: "#2a9d8f", fontFamily: "'SF Mono', monospace" }}>
+                      {showTotal ? `${sym}${fmt(liquidCashTotal)}` : "••••"}
+                    </span>
+                  </div>
+                  {liquidCashItems.length > 0 ? liquidCashItems.map((item, i) => {
+                    const itemSym = getCurrencySymbol(item.currency);
+                    const itemCny = toCNY(item.balance, item.currency, rates);
+                    return (
+                      <div key={`${item.currency}-${i}`} style={{
+                        display: "flex", justifyContent: "space-between", alignItems: "center",
+                        padding: "8px 0", borderTop: "1px solid #f8f8f8",
+                      }}>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 500, color: "#1a1a2e" }}>{item.currency}</div>
+                          <div style={{ fontSize: 11, color: "#aaa" }}>≈ ¥{showTotal ? fmt(itemCny) : "••••"}</div>
+                        </div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: "#2a9d8f", fontFamily: "'SF Mono', monospace" }}>
+                          {showTotal ? `${itemSym}${fmt(item.balance)}` : "••••"}
+                        </div>
+                      </div>
+                    );
+                  }) : (
+                    <div style={{ fontSize: 12, color: "#bbb", paddingTop: 4 }}>暂无流动现金</div>
+                  )}
                 </div>
               </div>
             )}
@@ -509,7 +609,7 @@ const EditPage = ({ data, setData }) => {
   const [saved, setSaved] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null); // { type, acctKey?, idx? }
   const [addingHolding, setAddingHolding] = useState(null); // acctKey
-  const [newHolding, setNewHolding] = useState({ code: "", shares: 0, cashPosition: 0, marketValue: 0 });
+  const [newHolding, setNewHolding] = useState({ code: "", market: "US", shares: 0, cashPosition: 0, marketValue: 0 });
   const [editingAcct, setEditingAcct] = useState(null); // acctKey
   const [acctDraft, setAcctDraft] = useState({ name: "", platform: "" });
   const [addingAccount, setAddingAccount] = useState(false);
@@ -537,7 +637,7 @@ const EditPage = ({ data, setData }) => {
         platform: newAccount.platform.trim(),
         currency: newAccount.currency,
         type: newAccount.type,
-        liquidCash: 0,
+        liquidCashItems: [],
         holdings: [],
       };
       return nd;
@@ -549,7 +649,19 @@ const EditPage = ({ data, setData }) => {
   const updateHolding = (acctKey, idx, field, val) => {
     setData(d => {
       const nd = deepClone(d);
-      nd.accounts[acctKey].holdings[idx][field] = parseFloat(val) || 0;
+      const account = nd.accounts[acctKey];
+      const holding = account.holdings[idx];
+
+      if (account.type === "stock" && field === "market") {
+        holding.market = val;
+        holding.code = normalizeStockCode(holding.code, val);
+      } else if (account.type === "stock" && field === "code") {
+        holding.code = normalizeStockCode(val, holding.market || "US");
+      } else {
+        holding[field] = ["shares", "cashPosition", "marketValue"].includes(field)
+          ? (parseFloat(val) || 0)
+          : val;
+      }
       return nd;
     });
   };
@@ -563,10 +675,28 @@ const EditPage = ({ data, setData }) => {
     setConfirmDelete(null);
   };
 
-  const updateLiquidCash = (acctKey, val) => {
+  const updateLiquidCashItem = (acctKey, idx, field, val) => {
     setData(d => {
       const nd = deepClone(d);
-      nd.accounts[acctKey].liquidCash = parseFloat(val) || 0;
+      nd.accounts[acctKey].liquidCashItems[idx][field] = field === "balance" ? (parseFloat(val) || 0) : val;
+      return nd;
+    });
+  };
+
+  const addLiquidCashItem = (acctKey) => {
+    setData(d => {
+      const nd = deepClone(d);
+      const account = nd.accounts[acctKey];
+      if (!Array.isArray(account.liquidCashItems)) account.liquidCashItems = [];
+      account.liquidCashItems.push(makeLiquidCashItem(account.currency));
+      return nd;
+    });
+  };
+
+  const deleteLiquidCashItem = (acctKey, idx) => {
+    setData(d => {
+      const nd = deepClone(d);
+      nd.accounts[acctKey].liquidCashItems.splice(idx, 1);
       return nd;
     });
   };
@@ -577,14 +707,20 @@ const EditPage = ({ data, setData }) => {
       const nd = deepClone(d);
       const acct = nd.accounts[acctKey];
       if (acct.type === "stock") {
-        acct.holdings.push({ code: newHolding.code.trim().toUpperCase(), shares: newHolding.shares || 0, cashPosition: newHolding.cashPosition || 0, group: "" });
+        acct.holdings.push({
+          code: normalizeStockCode(newHolding.code, newHolding.market),
+          market: newHolding.market,
+          shares: newHolding.shares || 0,
+          cashPosition: newHolding.cashPosition || 0,
+          group: "",
+        });
       } else {
         acct.holdings.push({ code: newHolding.code.trim(), marketValue: newHolding.marketValue || 0, group: "" });
       }
       return nd;
     });
     setAddingHolding(null);
-    setNewHolding({ code: "", shares: 0, cashPosition: 0, marketValue: 0 });
+    setNewHolding({ code: "", market: "US", shares: 0, cashPosition: 0, marketValue: 0 });
   };
 
   const deleteAccount = (acctKey) => {
@@ -666,17 +802,20 @@ const EditPage = ({ data, setData }) => {
         <span style={{ fontSize: 16 }}>💡</span><span>需手动更新：持仓股数、基金市值、流动现金、现金账户余额</span>
       </div>
 
-      {acctEntries.map(([acctKey, account]) => (
-        <Card key={acctKey} title={account.name} extra={account.platform}
-          headerRight={
-            <div style={{ display: "flex", gap: 6 }}>
-              <button onClick={() => { setEditingAcct(acctKey); setAcctDraft({ name: account.name, platform: account.platform || "" }); }}
-                style={{ background: "none", border: "none", fontSize: 14, color: "#0f3460", cursor: "pointer", padding: "0 4px" }}>✏️</button>
-              <button onClick={() => setConfirmDelete({ type: "account", acctKey })}
-                style={{ ...dangerBtnStyle, fontSize: 16, padding: "0 4px", lineHeight: 1 }}>🗑</button>
-            </div>
-          }
-        >
+      {acctEntries.map(([acctKey, account]) => {
+        const liquidCashItems = getAccountLiquidCashItems(account);
+
+        return (
+          <Card key={acctKey} title={account.name} extra={account.platform}
+            headerRight={
+              <div style={{ display: "flex", gap: 6 }}>
+                <button onClick={() => { setEditingAcct(acctKey); setAcctDraft({ name: account.name, platform: account.platform || "" }); }}
+                  style={{ background: "none", border: "none", fontSize: 14, color: "#0f3460", cursor: "pointer", padding: "0 4px" }}>✏️</button>
+                <button onClick={() => setConfirmDelete({ type: "account", acctKey })}
+                  style={{ ...dangerBtnStyle, fontSize: 16, padding: "0 4px", lineHeight: 1 }}>🗑</button>
+              </div>
+            }
+          >
           {/* Account name/platform edit form */}
           {editingAcct === acctKey && (
             <div style={{ background: "#f8f9fa", borderRadius: 12, padding: 12, marginBottom: 12 }}>
@@ -701,15 +840,16 @@ const EditPage = ({ data, setData }) => {
             </div>
           )}
           {account.holdings.map((h, i) => {
-            const price = account.type === "stock" ? getPrice(data, h.code) : 0;
+            const price = account.type === "stock" ? getHoldingPrice(data, h) : 0;
+            const priceSym = getHoldingPriceSymbol(h, account);
             return (
               <div key={i} style={{ marginBottom: 12, padding: "8px 0", borderBottom: "1px solid #f5f5f5" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: 14, fontWeight: 600, color: "#1a1a2e" }}>{h.code}</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: "#1a1a2e" }}>{h.code}{account.type === "stock" ? ` · ${h.market}` : ""}</span>
                     {account.type === "stock" && (
                       <span style={{ fontSize: 11, color: "#2a9d8f", background: "#e8f5e9", borderRadius: 6, padding: "1px 6px" }}>
-                        ${fmt(price)}
+                        {priceSym}{fmt(price)}
                       </span>
                     )}
                   </div>
@@ -718,6 +858,19 @@ const EditPage = ({ data, setData }) => {
                 </div>
                 {account.type === "stock" ? (
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div>
+                      <label style={labelStyle}>市场</label>
+                      <select value={h.market || "US"} onChange={e => updateHolding(acctKey, i, "market", e.target.value)}
+                        style={{ ...inputStyle, fontSize: 13, padding: "8px 10px", appearance: "auto", background: "#fafafa" }}>
+                        <option value="US">US (美股)</option>
+                        <option value="HK">HK (港股)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>股票代码</label>
+                      <input value={h.code} onChange={e => updateHolding(acctKey, i, "code", e.target.value)}
+                        style={inputStyle} />
+                    </div>
                     <div>
                       <label style={labelStyle}>股票持仓 (股)</label>
                       <input type="number" step="any" value={h.shares} onChange={e => updateHolding(acctKey, i, "shares", e.target.value)} style={inputStyle} />
@@ -738,25 +891,25 @@ const EditPage = ({ data, setData }) => {
             );
           })}
 
-          {/* Liquid cash input */}
-          <div style={{ background: "#f0f9f6", borderRadius: 10, padding: 10, marginBottom: 10, marginTop: 4 }}>
-            <label style={{ ...labelStyle, color: "#2a9d8f", fontWeight: 600 }}>💰 流动现金 ({account.currency}) · 计入总资产</label>
-            <input type="number" step="any" value={account.liquidCash || 0}
-              onChange={e => updateLiquidCash(acctKey, e.target.value)}
-              style={{ ...inputStyle, fontSize: 14 }} />
-          </div>
-
           {/* Add holding */}
           {addingHolding === acctKey ? (
             <div style={{ background: "#f8f9fa", borderRadius: 12, padding: 12, marginTop: 4 }}>
               <div style={{ marginBottom: 8 }}>
                 <label style={labelStyle}>{account.type === "stock" ? "股票代码" : "基金名称"}</label>
                 <input value={newHolding.code} onChange={e => setNewHolding({ ...newHolding, code: e.target.value })}
-                  placeholder={account.type === "stock" ? "如 AAPL" : "如 华夏沪深300"}
+                  placeholder={account.type === "stock" ? (newHolding.market === "HK" ? "如 2714 / 02714.HK" : "如 AAPL") : "如 华夏沪深300"}
                   style={{ ...inputStyle, fontSize: 13 }} />
               </div>
               {account.type === "stock" ? (
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                  <div>
+                    <label style={labelStyle}>市场</label>
+                    <select value={newHolding.market} onChange={e => setNewHolding({ ...newHolding, market: e.target.value })}
+                      style={{ ...inputStyle, fontSize: 13, padding: "8px 10px", appearance: "auto", background: "#fafafa" }}>
+                      <option value="US">US (美股)</option>
+                      <option value="HK">HK (港股)</option>
+                    </select>
+                  </div>
                   <div>
                     <label style={labelStyle}>持仓 (股)</label>
                     <input type="number" step="any" value={newHolding.shares} onChange={e => setNewHolding({ ...newHolding, shares: parseFloat(e.target.value) || 0 })} style={{ ...inputStyle, fontSize: 13 }} />
@@ -773,20 +926,57 @@ const EditPage = ({ data, setData }) => {
                 </div>
               )}
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { setAddingHolding(null); setNewHolding({ code: "", shares: 0, cashPosition: 0, marketValue: 0 }); }}
+                <button onClick={() => { setAddingHolding(null); setNewHolding({ code: "", market: "US", shares: 0, cashPosition: 0, marketValue: 0 }); }}
                   style={{ flex: 1, padding: 10, border: "1px solid #ddd", borderRadius: 8, background: "#fff", fontSize: 13, cursor: "pointer", color: "#666" }}>取消</button>
                 <button onClick={() => addHolding(acctKey)}
                   style={{ flex: 1, padding: 10, border: "none", borderRadius: 8, background: "#0f3460", fontSize: 13, cursor: "pointer", color: "#fff", fontWeight: 600 }}>添加</button>
               </div>
             </div>
           ) : (
-            <button onClick={() => { setAddingHolding(acctKey); setNewHolding({ code: "", shares: 0, cashPosition: 0, marketValue: 0 }); }}
+            <button onClick={() => { setAddingHolding(acctKey); setNewHolding({ code: "", market: "US", shares: 0, cashPosition: 0, marketValue: 0 }); }}
               style={{ width: "100%", padding: 10, border: "1.5px dashed #ccc", borderRadius: 10, background: "transparent", color: "#999", fontSize: 13, cursor: "pointer", marginTop: 4 }}>
               + 新增{account.type === "stock" ? "股票" : "基金"}
             </button>
           )}
-        </Card>
-      ))}
+
+          <div style={{ background: "#f0f9f6", borderRadius: 10, padding: 10, marginTop: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <label style={{ ...labelStyle, color: "#2a9d8f", fontWeight: 600, marginBottom: 0 }}>
+                💰 流动现金（多币种）· 计入总资产
+              </label>
+              <button onClick={() => addLiquidCashItem(acctKey)}
+                style={{ background: "none", border: "none", color: "#2a9d8f", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                + 新增
+              </button>
+            </div>
+            {liquidCashItems.length > 0 ? liquidCashItems.map((item, i) => (
+              <div key={`${acctKey}-cash-${i}`} style={{ marginBottom: i < liquidCashItems.length - 1 ? 10 : 0 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end" }}>
+                  <div>
+                    <label style={labelStyle}>币种</label>
+                    <select value={item.currency} onChange={e => updateLiquidCashItem(acctKey, i, "currency", e.target.value)}
+                      style={{ ...inputStyle, fontSize: 13, padding: "8px 10px", appearance: "auto", background: "#fff" }}>
+                      <option value="CNY">CNY (人民币)</option>
+                      <option value="USD">USD (美元)</option>
+                      <option value="HKD">HKD (港币)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={labelStyle}>余额</label>
+                    <input type="number" step="any" value={item.balance}
+                      onChange={e => updateLiquidCashItem(acctKey, i, "balance", e.target.value)}
+                      style={{ ...inputStyle, fontSize: 13, background: "#fff" }} />
+                  </div>
+                  <button onClick={() => deleteLiquidCashItem(acctKey, i)} style={{ ...dangerBtnStyle, marginBottom: 6 }}>删除</button>
+                </div>
+              </div>
+            )) : (
+              <div style={{ fontSize: 12, color: "#7da79b" }}>暂无流动现金，点击右上角新增</div>
+            )}
+          </div>
+          </Card>
+        );
+      })}
 
       {/* Add new account */}
       {addingAccount ? (
@@ -949,8 +1139,8 @@ const EditPage = ({ data, setData }) => {
               reader.onload = (ev) => {
                 try {
                   const parsed = JSON.parse(ev.target.result);
-                  if (parsed.accounts && parsed.cashAccount) {
-                    setData(parsed);
+                  if (parsed.accounts) {
+                    setData(normalizeLoadedData(parsed));
                     setSaved(true);
                     setTimeout(() => setSaved(false), 2000);
                   } else {
@@ -1191,16 +1381,7 @@ function AssetManager() {
       try {
         const result = (() => { const v = localStorage.getItem("asset-data-v3"); return v ? { value: v } : null; })();
         if (result && result.value) {
-          const parsed = JSON.parse(result.value);
-          if (!parsed.stockPrices) parsed.stockPrices = { ...DEFAULT_DATA.stockPrices };
-          if (!parsed.strategies) parsed.strategies = [...DEFAULT_DATA.strategies];
-          if (!parsed.cashAccount) parsed.cashAccount = parsed.accounts?.cash ? { items: parsed.accounts.cash.items } : DEFAULT_DATA.cashAccount;
-          // Remove legacy cash from accounts
-          if (parsed.accounts?.cash) delete parsed.accounts.cash;
-          // Ensure liquidCash field exists for every account
-          if (parsed.accounts) {
-            Object.values(parsed.accounts).forEach(a => { if (a.liquidCash === undefined) a.liquidCash = 0; });
-          }
+          const parsed = normalizeLoadedData(JSON.parse(result.value));
           setData(parsed);
           if (parsed.lastFetchTime) setLastFetch(parsed.lastFetchTime);
         }
@@ -1221,21 +1402,26 @@ function AssetManager() {
     const newRates = await fetchExchangeRates();
     if (newRates) { setData(d => ({ ...d, exchangeRates: newRates })); ratesOk = true; }
 
-    const tickers = getAllTickers(data);
-    if (tickers.length > 0) {
-      const newPrices = await fetchStockPrices(tickers);
-      if (Object.keys(newPrices).length > 0) {
-        setData(d => ({ ...d, stockPrices: { ...d.stockPrices, ...newPrices } }));
-        pricesOk = true;
-      }
-    } else {
-      pricesOk = true; // no tickers to fetch
+    const targets = getStockQuoteTargets(data);
+    const hasHKHoldings = targets.hk.length > 0;
+    const usPrices = await fetchUSStockPrices(targets.us);
+    const hkPrices = await fetchHKStockPrices(targets.hk);
+    const newPrices = { ...usPrices, ...hkPrices };
+    const hkReady = !hasHKHoldings || !!ITICK_API_TOKEN;
+
+    if (Object.keys(newPrices).length > 0) {
+      setData(d => ({ ...d, stockPrices: { ...d.stockPrices, ...newPrices } }));
     }
+
+    pricesOk = (targets.us.length === 0 || Object.keys(usPrices).length > 0 || !FINNHUB_API_KEY || FINNHUB_API_KEY === "YOUR_FINNHUB_API_KEY")
+      && (targets.hk.length === 0 || Object.keys(hkPrices).length > 0 || !hkReady);
 
     const now = new Date();
     const timeStr = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
     const noKey = FINNHUB_API_KEY === "YOUR_FINNHUB_API_KEY";
+    const noItickToken = hasHKHoldings && !ITICK_API_TOKEN;
     const statusStr = noKey ? `${timeStr} (请设置 Finnhub API Key)`
+      : noItickToken ? `${timeStr} (请设置 iTick Token)`
       : (ratesOk && pricesOk) ? timeStr
       : ratesOk ? `${timeStr} (股票获取失败)` : pricesOk ? `${timeStr} (汇率获取失败)` : `${timeStr} (获取失败，使用缓存)`;
     setLastFetch(statusStr);
