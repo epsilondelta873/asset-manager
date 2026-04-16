@@ -34,21 +34,21 @@ const DEFAULT_DATA = {
   ],
   accounts: {
     daodaozhijian: {
-      name: "大道至简", platform: "嘉信", currency: "USD", type: "stock",
+      name: "大道至简", platform: "嘉信", currency: "USD", type: "stock", liquidCash: 0,
       holdings: [
         { code: "QLD", shares: 2, cashPosition: 367.03, group: "投资-进攻" },
         { code: "IBIT", shares: 0, cashPosition: 500, group: "投资-进攻" },
       ],
     },
     wenjian: {
-      name: "稳健投资", platform: "汇丰", currency: "USD", type: "stock",
+      name: "稳健投资", platform: "汇丰", currency: "USD", type: "stock", liquidCash: 0,
       holdings: [
         { code: "QQQM", shares: 0, cashPosition: 0, group: "投资-进攻" },
         { code: "BOXX", shares: 2, cashPosition: 0, group: "投资-进攻" },
       ],
     },
     zhifubao: {
-      name: "支付宝场外", platform: "支付宝", currency: "CNY", type: "fund",
+      name: "支付宝场外", platform: "支付宝", currency: "CNY", type: "fund", liquidCash: 0,
       holdings: [
         { code: "诺安全球黄金", marketValue: 6029.33, group: "支付宝场外" },
         { code: "华宝纳斯达克", marketValue: 6973.37, group: "支付宝场外" },
@@ -57,13 +57,13 @@ const DEFAULT_DATA = {
       ],
     },
     zhifubaoOther: {
-      name: "汇丰-灵活智投", platform: "汇丰", currency: "HKD", type: "fund",
+      name: "汇丰-灵活智投", platform: "汇丰", currency: "HKD", type: "fund", liquidCash: 0,
       holdings: [
         { code: "灵活智投", marketValue: 184.21, group: "其他" },
       ],
     },
     touji: {
-      name: "投机账户", platform: "盈透", currency: "USD", type: "stock",
+      name: "投机账户", platform: "盈透", currency: "USD", type: "stock", liquidCash: 0,
       holdings: [
         { code: "QLD", shares: 1.4265, cashPosition: 0, group: "其他" },
         { code: "KORU", shares: 1.1845, cashPosition: 265.42, group: "其他" },
@@ -97,8 +97,10 @@ function calcAccountValue(account, data) {
   let total = 0;
   for (const h of (account.holdings || [])) {
     if (account.type === "fund") total += h.marketValue || 0;
-    else total += (h.shares || 0) * getPrice(data, h.code) + (h.cashPosition || 0);
+    else total += (h.shares || 0) * getPrice(data, h.code);
+    // 注意：cashPosition 是现金仓位备忘，不计入账户价值
   }
+  total += account.liquidCash || 0; // 流动现金计入账户价值
   return total;
 }
 
@@ -141,7 +143,7 @@ async function fetchExchangeRates() {
 
 // Finnhub API - 免费，支持CORS，浏览器直接调用
 // 在 https://finnhub.io/register 免费注册获取 API Key
-const FINNHUB_API_KEY = "d73s5rhr01qjjol45cegd73s5rhr01qjjol45cf0"; // ← 替换为你自己的 Key
+const FINNHUB_API_KEY = "YOUR_FINNHUB_API_KEY"; // ← 替换为你自己的 Key
 
 async function fetchStockPrices(tickers) {
   const prices = {};
@@ -443,22 +445,29 @@ const AccountsPage = ({ data, showTotal }) => {
                   const mv = account.type === "fund" ? (h.marketValue || 0) : (h.shares || 0) * price;
                   const cash = h.cashPosition || 0;
                   return (
-                    <div key={i} style={{ padding: "8px 0", borderBottom: i < account.holdings.length - 1 ? "1px solid #f8f8f8" : "none" }}>
+                    <div key={i} style={{ padding: "8px 0", borderBottom: "1px solid #f8f8f8" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                         <span style={{ fontSize: 14, fontWeight: 600 }}>{h.code}</span>
                         <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'SF Mono', monospace" }}>
-                          {showTotal ? fmt(mv + cash) : "••••"}
+                          {showTotal ? fmt(mv) : "••••"}
                         </span>
                       </div>
                       {account.type === "stock" && (
                         <div style={{ fontSize: 11, color: "#999", display: "flex", justifyContent: "space-between" }}>
                           <span>持仓: {h.shares}股 × {sym}{fmt(price)}</span>
-                          <span>现金: {sym}{fmt(cash)}</span>
+                          {cash > 0 && <span style={{ color: "#bbb" }}>现金仓位备忘: {sym}{fmt(cash)}</span>}
                         </div>
                       )}
                     </div>
                   );
                 })}
+                {/* Liquid cash */}
+                <div style={{ padding: "10px 0 4px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 13, fontWeight: 500, color: "#2a9d8f" }}>💰 流动现金</span>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: "#2a9d8f", fontFamily: "'SF Mono', monospace" }}>
+                    {showTotal ? `${sym}${fmt(account.liquidCash || 0)}` : "••••"}
+                  </span>
+                </div>
               </div>
             )}
           </Card>
@@ -501,6 +510,41 @@ const EditPage = ({ data, setData }) => {
   const [confirmDelete, setConfirmDelete] = useState(null); // { type, acctKey?, idx? }
   const [addingHolding, setAddingHolding] = useState(null); // acctKey
   const [newHolding, setNewHolding] = useState({ code: "", shares: 0, cashPosition: 0, marketValue: 0 });
+  const [editingAcct, setEditingAcct] = useState(null); // acctKey
+  const [acctDraft, setAcctDraft] = useState({ name: "", platform: "" });
+  const [addingAccount, setAddingAccount] = useState(false);
+  const [newAccount, setNewAccount] = useState({ name: "", platform: "", currency: "USD", type: "stock" });
+
+  const updateAccountMeta = (acctKey) => {
+    if (!acctDraft.name.trim()) return;
+    setData(d => {
+      const nd = deepClone(d);
+      nd.accounts[acctKey].name = acctDraft.name.trim();
+      nd.accounts[acctKey].platform = acctDraft.platform.trim();
+      return nd;
+    });
+    setEditingAcct(null);
+  };
+
+  const addAccount = () => {
+    if (!newAccount.name.trim()) return;
+    setData(d => {
+      const nd = deepClone(d);
+      // Generate a unique key
+      const baseKey = "acct" + Date.now();
+      nd.accounts[baseKey] = {
+        name: newAccount.name.trim(),
+        platform: newAccount.platform.trim(),
+        currency: newAccount.currency,
+        type: newAccount.type,
+        liquidCash: 0,
+        holdings: [],
+      };
+      return nd;
+    });
+    setAddingAccount(false);
+    setNewAccount({ name: "", platform: "", currency: "USD", type: "stock" });
+  };
 
   const updateHolding = (acctKey, idx, field, val) => {
     setData(d => {
@@ -517,6 +561,14 @@ const EditPage = ({ data, setData }) => {
       return nd;
     });
     setConfirmDelete(null);
+  };
+
+  const updateLiquidCash = (acctKey, val) => {
+    setData(d => {
+      const nd = deepClone(d);
+      nd.accounts[acctKey].liquidCash = parseFloat(val) || 0;
+      return nd;
+    });
   };
 
   const addHolding = (acctKey) => {
@@ -611,16 +663,43 @@ const EditPage = ({ data, setData }) => {
         <span style={{ fontSize: 16 }}>✅</span><span>汇率和股票价格已自动获取，无需手动更新</span>
       </div>
       <div style={{ background: "#fff8e1", borderRadius: 12, padding: 12, marginBottom: 16, fontSize: 13, color: "#f57f17", display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 16 }}>💡</span><span>需手动更新：持仓股数、现金仓位、基金市值、现金余额</span>
+        <span style={{ fontSize: 16 }}>💡</span><span>需手动更新：持仓股数、基金市值、流动现金、现金账户余额</span>
       </div>
 
       {acctEntries.map(([acctKey, account]) => (
-        <Card key={acctKey} title={account.name} extra="🟡 手动更新"
+        <Card key={acctKey} title={account.name} extra={account.platform}
           headerRight={
-            <button onClick={() => setConfirmDelete({ type: "account", acctKey })}
-              style={{ ...dangerBtnStyle, fontSize: 18, padding: "0 4px", lineHeight: 1 }}>🗑</button>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => { setEditingAcct(acctKey); setAcctDraft({ name: account.name, platform: account.platform || "" }); }}
+                style={{ background: "none", border: "none", fontSize: 14, color: "#0f3460", cursor: "pointer", padding: "0 4px" }}>✏️</button>
+              <button onClick={() => setConfirmDelete({ type: "account", acctKey })}
+                style={{ ...dangerBtnStyle, fontSize: 16, padding: "0 4px", lineHeight: 1 }}>🗑</button>
+            </div>
           }
         >
+          {/* Account name/platform edit form */}
+          {editingAcct === acctKey && (
+            <div style={{ background: "#f8f9fa", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                <div>
+                  <label style={labelStyle}>账户名称</label>
+                  <input value={acctDraft.name} onChange={e => setAcctDraft({ ...acctDraft, name: e.target.value })}
+                    style={{ ...inputStyle, fontSize: 13 }} />
+                </div>
+                <div>
+                  <label style={labelStyle}>平台</label>
+                  <input value={acctDraft.platform} onChange={e => setAcctDraft({ ...acctDraft, platform: e.target.value })}
+                    placeholder="如 嘉信、汇丰" style={{ ...inputStyle, fontSize: 13 }} />
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setEditingAcct(null)}
+                  style={{ flex: 1, padding: 8, border: "1px solid #ddd", borderRadius: 8, background: "#fff", fontSize: 13, cursor: "pointer", color: "#666" }}>取消</button>
+                <button onClick={() => updateAccountMeta(acctKey)}
+                  style={{ flex: 1, padding: 8, border: "none", borderRadius: 8, background: "#0f3460", fontSize: 13, cursor: "pointer", color: "#fff", fontWeight: 600 }}>保存</button>
+              </div>
+            </div>
+          )}
           {account.holdings.map((h, i) => {
             const price = account.type === "stock" ? getPrice(data, h.code) : 0;
             return (
@@ -644,8 +723,9 @@ const EditPage = ({ data, setData }) => {
                       <input type="number" step="any" value={h.shares} onChange={e => updateHolding(acctKey, i, "shares", e.target.value)} style={inputStyle} />
                     </div>
                     <div>
-                      <label style={labelStyle}>现金仓位 ($)</label>
-                      <input type="number" step="any" value={h.cashPosition} onChange={e => updateHolding(acctKey, i, "cashPosition", e.target.value)} style={inputStyle} />
+                      <label style={{ ...labelStyle, color: "#bbb" }}>现金仓位（仅备忘）</label>
+                      <input type="number" step="any" value={h.cashPosition} onChange={e => updateHolding(acctKey, i, "cashPosition", e.target.value)}
+                        style={{ ...inputStyle, color: "#999", background: "#fafafa" }} />
                     </div>
                   </div>
                 ) : (
@@ -657,6 +737,14 @@ const EditPage = ({ data, setData }) => {
               </div>
             );
           })}
+
+          {/* Liquid cash input */}
+          <div style={{ background: "#f0f9f6", borderRadius: 10, padding: 10, marginBottom: 10, marginTop: 4 }}>
+            <label style={{ ...labelStyle, color: "#2a9d8f", fontWeight: 600 }}>💰 流动现金 ({account.currency}) · 计入总资产</label>
+            <input type="number" step="any" value={account.liquidCash || 0}
+              onChange={e => updateLiquidCash(acctKey, e.target.value)}
+              style={{ ...inputStyle, fontSize: 14 }} />
+          </div>
 
           {/* Add holding */}
           {addingHolding === acctKey ? (
@@ -699,6 +787,53 @@ const EditPage = ({ data, setData }) => {
           )}
         </Card>
       ))}
+
+      {/* Add new account */}
+      {addingAccount ? (
+        <Card title="新增账户">
+          <div style={{ marginBottom: 8 }}>
+            <label style={labelStyle}>账户名称</label>
+            <input value={newAccount.name} onChange={e => setNewAccount({ ...newAccount, name: e.target.value })}
+              placeholder="如 雪球基金" style={{ ...inputStyle, fontSize: 13 }} />
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <label style={labelStyle}>平台（可选）</label>
+            <input value={newAccount.platform} onChange={e => setNewAccount({ ...newAccount, platform: e.target.value })}
+              placeholder="如 雪球、富途" style={{ ...inputStyle, fontSize: 13 }} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+            <div>
+              <label style={labelStyle}>账户类型</label>
+              <select value={newAccount.type} onChange={e => setNewAccount({ ...newAccount, type: e.target.value })}
+                style={{ ...inputStyle, fontSize: 13, padding: "8px 10px", appearance: "auto", background: "#fafafa" }}>
+                <option value="stock">股票 (自动获取价格)</option>
+                <option value="fund">基金 (手动填市值)</option>
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle}>币种</label>
+              <select value={newAccount.currency} onChange={e => setNewAccount({ ...newAccount, currency: e.target.value })}
+                style={{ ...inputStyle, fontSize: 13, padding: "8px 10px", appearance: "auto", background: "#fafafa" }}>
+                <option value="USD">USD</option>
+                <option value="CNY">CNY</option>
+                <option value="HKD">HKD</option>
+              </select>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => { setAddingAccount(false); setNewAccount({ name: "", platform: "", currency: "USD", type: "stock" }); }}
+              style={{ flex: 1, padding: 10, border: "1px solid #ddd", borderRadius: 8, background: "#fff", fontSize: 13, cursor: "pointer", color: "#666" }}>取消</button>
+            <button onClick={addAccount}
+              style={{ flex: 1, padding: 10, border: "none", borderRadius: 8, background: "#0f3460", fontSize: 13, cursor: "pointer", color: "#fff", fontWeight: 600 }}>创建账户</button>
+          </div>
+        </Card>
+      ) : (
+        <button onClick={() => setAddingAccount(true)}
+          style={{ width: "100%", padding: 14, border: "2px dashed #ccc", borderRadius: 14,
+            background: "transparent", color: "#999", fontSize: 14, fontWeight: 600, cursor: "pointer", marginBottom: 12 }}>
+          + 新增投资账户
+        </button>
+      )}
 
       <Card title="现金账户" extra="🟡 手动更新">
         {data.cashAccount.items.map((item, i) => (
@@ -1062,6 +1197,10 @@ function AssetManager() {
           if (!parsed.cashAccount) parsed.cashAccount = parsed.accounts?.cash ? { items: parsed.accounts.cash.items } : DEFAULT_DATA.cashAccount;
           // Remove legacy cash from accounts
           if (parsed.accounts?.cash) delete parsed.accounts.cash;
+          // Ensure liquidCash field exists for every account
+          if (parsed.accounts) {
+            Object.values(parsed.accounts).forEach(a => { if (a.liquidCash === undefined) a.liquidCash = 0; });
+          }
           setData(parsed);
           if (parsed.lastFetchTime) setLastFetch(parsed.lastFetchTime);
         }
